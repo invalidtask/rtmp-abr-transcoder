@@ -1,0 +1,10 @@
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+.vscode/
+.idea/
+CMakeFiles/
+cmake-build-*/

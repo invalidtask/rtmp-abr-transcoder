@@ -1,0 +1,388 @@
+#include "relay/relay_manager.hpp"
+#include "core/log.hpp"
+#include "core/time.hpp"
+#include <sys/epoll.h>
+#include <algorithm>
+#include <sstream>
+
+namespace relay {
+
+RelayManager::RelayManager(EpollLoop& loop, const RelayPolicy& policy)
+    : loop_(loop), policy_(policy), push_template_("{app}/{stream}") {}
+
+void RelayManager::set_push_url(const std::string& url) {
+    push_url_ = url;
+}
+
+void RelayManager::set_push_template(const std::string& tmpl) {
+    push_template_ = tmpl;
+}
+
+Result<void> RelayManager::start_server(const std::string& addr, uint16_t port) {
+    server_ = std::make_unique<rtmp::Server>(loop_);
+    
+    server_->set_connection_callback([this](std::shared_ptr<rtmp::Session> session, Socket socket) {
+        handle_new_publisher(session, std::move(socket));
+    });
+    
+    return server_->start(addr, port);
+}
+
+void RelayManager::handle_new_publisher(std::shared_ptr<rtmp::Session> session, Socket socket) {
+    auto publisher = std::make_unique<Publisher>();
+    publisher->session = session;
+    publisher->socket = std::move(socket);
+    publisher->ready = false;
+    
+    Publisher* pub_ptr = publisher.get();
+    publishers_[pub_ptr] = std::move(publisher);
+    
+    session->set_message_callback([this, pub_ptr](const rtmp::Message& msg) {
+        handle_publisher_message(pub_ptr, msg);
+    });
+    
+    session->set_close_callback([this, pub_ptr]() {
+        remove_publisher(pub_ptr);
+    });
+    
+    setup_publisher_read(pub_ptr);
+}
+
+void RelayManager::setup_publisher_read(Publisher* pub) {
+    loop_.add(pub->socket.fd(), EPOLLIN | EPOLLOUT, [this, pub](uint32_t events) {
+        if (events & (EPOLLERR | EPOLLHUP)) {
+            remove_publisher(pub);
+            return;
+        }
+        
+        if (events & EPOLLIN) {
+            uint8_t buffer[8192];
+            auto read_result = pub->socket.read(buffer, sizeof(buffer));
+            
+            if (read_result.is_err()) {
+                Logger::error("Publisher read error: ", read_result.error());
+                remove_publisher(pub);
+                return;
+            }
+            
+            if (read_result.value() == 0) {
+                Logger::info("Publisher disconnected");
+                remove_publisher(pub);
+                return;
+            }
+            
+            if (!pub->session->handshake_done()) {
+                auto handshake_result = pub->session->handshake().process_client_handshake(
+                    std::span<const uint8_t>(buffer, read_result.value())
+                );
+                
+                if (handshake_result.is_ok()) {
+                    size_t consumed = handshake_result.value();
+                    
+                    auto response = pub->session->generate_server_handshake_response(
+                        std::span<const uint8_t>(buffer + 1, 1536)
+                    );
+                    
+                    pub->socket.write(response.data(), response.size());
+                    
+                    pub->session->send_window_ack_size(2500000);
+                    pub->session->send_set_peer_bandwidth(2500000, 2);
+                    pub->session->send_set_chunk_size(4096);
+                    
+                    if (consumed < read_result.value()) {
+                        auto process_result = pub->session->process_input(
+                            std::span<const uint8_t>(buffer + consumed, read_result.value() - consumed)
+                        );
+                    }
+                }
+            } else {
+                auto process_result = pub->session->process_input(
+                    std::span<const uint8_t>(buffer, read_result.value())
+                );
+            }
+        }
+        
+        if (events & EPOLLOUT) {
+            if (pub->session->has_outgoing_data()) {
+                auto data = pub->session->get_outgoing_data();
+                if (!data.empty()) {
+                    pub->socket.write(data.data(), data.size());
+                }
+            }
+        }
+    });
+}
+
+void RelayManager::handle_publisher_message(Publisher* pub, const rtmp::Message& msg) {
+    if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::CommandAMF0)) {
+        auto cmd = rtmp::CommandMessage::parse(msg.payload);
+        if (cmd) {
+            handle_publisher_command(pub, *cmd);
+        }
+    }
+    else if (pub->ready) {
+        auto it = pushers_.find(pub->stream_id);
+        if (it != pushers_.end()) {
+            relay_message(it->second.get(), msg);
+        }
+    }
+}
+
+void RelayManager::handle_publisher_command(Publisher* pub, const rtmp::CommandMessage& cmd) {
+    Logger::debug("Publisher command: ", cmd.name);
+    
+    if (cmd.name == "connect") {
+        std::string app_name;
+        if (!cmd.arguments.empty() && cmd.arguments[0].is_object()) {
+            auto& obj = cmd.arguments[0].as_object();
+            if (obj.count("app") && obj.at("app").is_string()) {
+                app_name = obj.at("app").as_string();
+            }
+        }
+        
+        pub->stream_id.app = app_name;
+        
+        rtmp::CommandMessage response;
+        response.name = "_result";
+        response.transaction_id = cmd.transaction_id;
+        
+        amf0::Value::ObjectType props;
+        props["fmsVer"] = amf0::Value::String("FMS/3,0,1,123");
+        props["capabilities"] = amf0::Value::Number(31);
+        response.arguments.push_back(amf0::Value::Object(props));
+        
+        amf0::Value::ObjectType info;
+        info["level"] = amf0::Value::String("status");
+        info["code"] = amf0::Value::String("NetConnection.Connect.Success");
+        info["description"] = amf0::Value::String("Connection succeeded");
+        info["objectEncoding"] = amf0::Value::Number(0);
+        response.arguments.push_back(amf0::Value::Object(info));
+        
+        pub->session->send_command(response);
+    }
+    else if (cmd.name == "createStream") {
+        rtmp::CommandMessage response;
+        response.name = "_result";
+        response.transaction_id = cmd.transaction_id;
+        response.arguments.push_back(amf0::Value::Null());
+        response.arguments.push_back(amf0::Value::Number(1));
+        
+        pub->session->send_command(response);
+    }
+    else if (cmd.name == "publish") {
+        if (!cmd.arguments.empty() && cmd.arguments[0].is_null() && 
+            cmd.arguments.size() > 1 && cmd.arguments[1].is_string()) {
+            
+            pub->stream_id.stream = cmd.arguments[1].as_string();
+            pub->ready = true;
+            
+            Logger::info("Publisher started: ", pub->stream_id.to_string());
+            
+            rtmp::CommandMessage response;
+            response.name = "onStatus";
+            response.transaction_id = 0;
+            response.arguments.push_back(amf0::Value::Null());
+            
+            amf0::Value::ObjectType info;
+            info["level"] = amf0::Value::String("status");
+            info["code"] = amf0::Value::String("NetStream.Publish.Start");
+            info["description"] = amf0::Value::String("Stream is now published");
+            response.arguments.push_back(amf0::Value::Object(info));
+            
+            pub->session->send_command(response);
+            
+            create_pusher(pub->stream_id);
+        }
+    }
+}
+
+void RelayManager::remove_publisher(Publisher* pub) {
+    if (publishers_.count(pub)) {
+        loop_.remove(pub->socket.fd());
+        publishers_.erase(pub);
+    }
+}
+
+void RelayManager::create_pusher(const StreamId& stream_id) {
+    if (push_url_.empty()) {
+        Logger::warn("No push URL configured, running in sink mode");
+        return;
+    }
+    
+    auto pusher = std::make_unique<Pusher>();
+    pusher->stream_id = stream_id;
+    pusher->client = std::make_unique<rtmp::Client>(loop_);
+    
+    Pusher* pusher_ptr = pusher.get();
+    
+    pusher->client->set_connected_callback([this, pusher_ptr]() {
+        handle_pusher_connected(pusher_ptr);
+    });
+    
+    pusher->client->set_message_callback([this, pusher_ptr](const rtmp::Message& msg) {
+        handle_pusher_message(pusher_ptr, msg);
+    });
+    
+    pusher->client->set_disconnected_callback([this, pusher_ptr]() {
+        handle_pusher_disconnected(pusher_ptr);
+    });
+    
+    std::string url = build_push_url(stream_id);
+    
+    size_t proto_end = url.find("://");
+    if (proto_end == std::string::npos) {
+        Logger::error("Invalid push URL: ", url);
+        return;
+    }
+    
+    size_t host_start = proto_end + 3;
+    size_t path_start = url.find('/', host_start);
+    
+    std::string host_port = url.substr(host_start, path_start - host_start);
+    auto addr_result = Socket::parse_address(host_port);
+    
+    if (addr_result.is_err()) {
+        Logger::error("Failed to parse push URL: ", addr_result.error());
+        return;
+    }
+    
+    auto [host, port] = addr_result.value();
+    
+    Logger::info("Connecting pusher to ", host, ":", port);
+    
+    auto connect_result = pusher->client->connect(host, port);
+    if (connect_result.is_err()) {
+        Logger::error("Failed to connect pusher: ", connect_result.error());
+        schedule_pusher_reconnect(pusher_ptr);
+    }
+    
+    pushers_[stream_id] = std::move(pusher);
+}
+
+void RelayManager::handle_pusher_connected(Pusher* pusher) {
+    Logger::info("Pusher connected for ", pusher->stream_id.to_string());
+    
+    pusher->connected = true;
+    pusher->reconnect_delay_ms = 100;
+    
+    std::string url = build_push_url(pusher->stream_id);
+    size_t path_start = url.find('/', url.find("://") + 3);
+    std::string path = path_start != std::string::npos ? url.substr(path_start) : "/";
+    
+    size_t app_end = path.find('/', 1);
+    std::string app = app_end != std::string::npos ? path.substr(1, app_end - 1) : path.substr(1);
+    
+    rtmp::CommandMessage connect_cmd;
+    connect_cmd.name = "connect";
+    connect_cmd.transaction_id = 1;
+    
+    amf0::Value::ObjectType connect_obj;
+    connect_obj["app"] = amf0::Value::String(app);
+    connect_obj["type"] = amf0::Value::String("nonprivate");
+    connect_obj["tcUrl"] = amf0::Value::String(url.substr(0, path_start + app.size() + 1));
+    connect_cmd.arguments.push_back(amf0::Value::Object(connect_obj));
+    
+    pusher->client->send_command(connect_cmd);
+}
+
+void RelayManager::handle_pusher_message(Pusher* pusher, const rtmp::Message& msg) {
+    if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::CommandAMF0)) {
+        auto cmd = rtmp::CommandMessage::parse(msg.payload);
+        if (cmd && cmd->name == "_result" && !pusher->publishing) {
+            if (cmd->transaction_id == 1) {
+                rtmp::CommandMessage create_stream;
+                create_stream.name = "createStream";
+                create_stream.transaction_id = 2;
+                create_stream.arguments.push_back(amf0::Value::Null());
+                
+                pusher->client->send_command(create_stream);
+            }
+            else if (cmd->transaction_id == 2) {
+                rtmp::CommandMessage publish_cmd;
+                publish_cmd.name = "publish";
+                publish_cmd.transaction_id = 0;
+                publish_cmd.arguments.push_back(amf0::Value::Null());
+                publish_cmd.arguments.push_back(amf0::Value::String(pusher->stream_id.stream));
+                publish_cmd.arguments.push_back(amf0::Value::String("live"));
+                
+                pusher->client->send_command(publish_cmd);
+                pusher->publishing = true;
+                
+                Logger::info("Pusher publishing to ", pusher->stream_id.to_string());
+                
+                for (const auto& buffered_msg : pusher->buffer) {
+                    pusher->client->send_message(buffered_msg);
+                }
+                pusher->buffer.clear();
+                pusher->pending_bytes = 0;
+            }
+        }
+    }
+}
+
+void RelayManager::handle_pusher_disconnected(Pusher* pusher) {
+    Logger::warn("Pusher disconnected for ", pusher->stream_id.to_string());
+    
+    pusher->connected = false;
+    pusher->publishing = false;
+    pusher->last_disconnect_time = time_util::now_ms();
+    
+    schedule_pusher_reconnect(pusher);
+}
+
+void RelayManager::relay_message(Pusher* pusher, const rtmp::Message& msg) {
+    if (msg.type_id != static_cast<uint8_t>(rtmp::MessageType::Audio) &&
+        msg.type_id != static_cast<uint8_t>(rtmp::MessageType::Video) &&
+        msg.type_id != static_cast<uint8_t>(rtmp::MessageType::DataAMF0)) {
+        return;
+    }
+    
+    if (pusher->publishing) {
+        pusher->client->send_message(msg);
+    } else {
+        pusher->pending_bytes += msg.payload.size();
+        
+        if (pusher->pending_bytes > policy_.max_pending_bytes) {
+            if (policy_.backpressure == BackpressurePolicy::DropOldest && !pusher->buffer.empty()) {
+                size_t dropped_size = pusher->buffer.front().payload.size();
+                pusher->buffer.erase(pusher->buffer.begin());
+                pusher->pending_bytes -= dropped_size;
+            }
+            else if (policy_.backpressure == BackpressurePolicy::DropNewest) {
+                pusher->pending_bytes -= msg.payload.size();
+                return;
+            }
+        }
+        
+        pusher->buffer.push_back(msg);
+    }
+}
+
+void RelayManager::schedule_pusher_reconnect(Pusher* pusher) {
+    pusher->reconnect_delay_ms = std::min(pusher->reconnect_delay_ms * 2, 5000u);
+}
+
+std::string RelayManager::build_push_url(const StreamId& stream_id) {
+    std::string result = push_template_;
+    
+    size_t pos = result.find("{app}");
+    if (pos != std::string::npos) {
+        result.replace(pos, 5, stream_id.app);
+    }
+    
+    pos = result.find("{stream}");
+    if (pos != std::string::npos) {
+        result.replace(pos, 8, stream_id.stream);
+    }
+    
+    if (push_url_.empty()) {
+        return result;
+    }
+    
+    if (push_url_.back() == '/') {
+        return push_url_ + result;
+    }
+    return push_url_ + "/" + result;
+}
+
+}
