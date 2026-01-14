@@ -375,6 +375,10 @@ std::string RelayManager::build_push_url(const StreamId& stream_id) {
         result.replace(pos, 8, stream_id.stream);
     }
     
+    if (push_url_.empty()) {
+        return result;
+    }
+    
     if (push_url_.back() == '/') {
         return push_url_ + result;
     }

@@ -1,35 +1,6 @@
+#include "test_framework.hpp"
 #include "rtmp/rtmp_chunks.hpp"
 #include "core/bytes.hpp"
-#include <functional>
-#include <sstream>
-#include <stdexcept>
-
-extern void register_test(const std::string& name, std::function<void()> func);
-
-#define TEST_CASE(name) \
-    static void test_##name(); \
-    static struct Register_##name { \
-        Register_##name() { register_test(#name, test_##name); } \
-    } register_##name; \
-    static void test_##name()
-
-#define REQUIRE(expr) \
-    do { \
-        if (!(expr)) { \
-            std::ostringstream oss; \
-            oss << "FAILED: " << #expr << " at " << __FILE__ << ":" << __LINE__; \
-            throw std::runtime_error(oss.str()); \
-        } \
-    } while(0)
-
-#define REQUIRE_EQUAL(a, b) \
-    do { \
-        if ((a) != (b)) { \
-            std::ostringstream oss; \
-            oss << "FAILED: " << #a << " != " << #b << " at " << __FILE__ << ":" << __LINE__; \
-            throw std::runtime_error(oss.str()); \
-        } \
-    } while(0)
 
 TEST_CASE(chunk_parse_fmt0_small) {
     rtmp::ChunkParser parser(128);
