@@ -1,5 +1,6 @@
 #include "rtmp/rtmp_chunks.hpp"
 #include "core/bytes.hpp"
+#include "core/log.hpp"
 #include <algorithm>
 
 namespace rtmp {
@@ -64,6 +65,11 @@ Result<std::pair<ChunkHeader, size_t>> ChunkParser::parse_header(
             header.has_extended_timestamp = true;
             offset += 4;
         }
+        
+        Logger::debug("Chunk header: fmt=", static_cast<int>(fmt),
+                      ", csid=", chunk_stream_id,
+                      ", msg_type=", static_cast<int>(header.message_type_id),
+                      ", msg_len=", header.message_length);
         
         state.prev_header = header;
     }

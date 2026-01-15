@@ -71,8 +71,12 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
                 return;
             }
             
+            Logger::debug("Read ", read_result.value(), " bytes from publisher");
+            
             if (!pub->session->handshake_done()) {
                 auto& hs = pub->session->handshake();
+                Logger::debug("Handshake state before: ", static_cast<int>(hs.state()));
+                
                 auto handshake_result = hs.process_client_handshake(
                     std::span<const uint8_t>(buffer, read_result.value())
                 );
@@ -84,7 +88,7 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
                 }
                 
                 size_t consumed = handshake_result.value();
-                Logger::debug("Handshake state: ", static_cast<int>(hs.state()), 
+                Logger::debug("Handshake state after: ", static_cast<int>(hs.state()), 
                              ", consumed: ", consumed, " bytes, total read: ", read_result.value());
                 
                 // After receiving C0+C1, send S0+S1+S2
@@ -112,12 +116,14 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
                     // Flush the protocol messages immediately
                     auto data = pub->session->get_outgoing_data();
                     if (!data.empty()) {
+                        Logger::debug("Flushing ", data.size(), " bytes of protocol messages to socket");
                         auto write_result = pub->socket.write(data.data(), data.size());
                         if (write_result.is_err()) {
                             Logger::error("Failed to write protocol messages: ", write_result.error());
                             remove_publisher(pub);
                             return;
                         }
+                        Logger::debug("Wrote ", write_result.value(), " bytes of protocol messages");
                     }
                 }
                 
@@ -166,6 +172,36 @@ void RelayManager::handle_publisher_message(Publisher* pub, const rtmp::Message&
         }
     }
     else if (pub->ready) {
+        // Track statistics and log media messages
+        if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::Audio)) {
+            pub->stats.audio_messages++;
+            pub->stats.audio_bytes += msg.payload.size();
+            Logger::debug("Received audio message, timestamp: ", msg.timestamp, 
+                          ", size: ", msg.payload.size());
+        }
+        else if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::Video)) {
+            pub->stats.video_messages++;
+            pub->stats.video_bytes += msg.payload.size();
+            bool is_keyframe = !msg.payload.empty() && (msg.payload[0] & 0xF0) == 0x10;
+            if (is_keyframe) {
+                pub->stats.keyframes++;
+            }
+            Logger::debug("Received video message, timestamp: ", msg.timestamp,
+                          ", size: ", msg.payload.size(),
+                          ", keyframe: ", is_keyframe);
+        }
+        else if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::DataAMF0)) {
+            pub->stats.data_messages++;
+            Logger::debug("Received data message, size: ", msg.payload.size());
+        }
+        
+        // Log stats periodically (every 5 seconds)
+        uint64_t now = time_util::now_ms();
+        if (now - pub->last_stats_log >= 5000) {
+            log_stats(pub);
+            pub->last_stats_log = now;
+        }
+        
         auto it = pushers_.find(pub->stream_id);
         if (it != pushers_.end()) {
             relay_message(it->second.get(), msg);
@@ -174,7 +210,9 @@ void RelayManager::handle_publisher_message(Publisher* pub, const rtmp::Message&
 }
 
 void RelayManager::handle_publisher_command(Publisher* pub, const rtmp::CommandMessage& cmd) {
-    Logger::debug("Publisher command: ", cmd.name);
+    Logger::debug("Publisher command: ", cmd.name, 
+                  ", txn_id: ", cmd.transaction_id,
+                  ", args: ", cmd.arguments.size());
     
     if (cmd.name == "connect") {
         std::string app_name;
@@ -204,6 +242,8 @@ void RelayManager::handle_publisher_command(Publisher* pub, const rtmp::CommandM
         response.arguments.push_back(amf0::Value::Object(info));
         
         pub->session->send_command(response);
+        Logger::debug("Sending _result for connect, txn_id: ", cmd.transaction_id);
+        flush_publisher_responses(pub);
     }
     else if (cmd.name == "createStream") {
         rtmp::CommandMessage response;
@@ -213,6 +253,8 @@ void RelayManager::handle_publisher_command(Publisher* pub, const rtmp::CommandM
         response.arguments.push_back(amf0::Value::Number(1));
         
         pub->session->send_command(response);
+        Logger::debug("Sending _result for createStream, txn_id: ", cmd.transaction_id);
+        flush_publisher_responses(pub);
     }
     else if (cmd.name == "publish") {
         if (!cmd.arguments.empty() && cmd.arguments[0].is_null() && 
@@ -220,6 +262,8 @@ void RelayManager::handle_publisher_command(Publisher* pub, const rtmp::CommandM
             
             pub->stream_id.stream = cmd.arguments[1].as_string();
             pub->ready = true;
+            pub->stats.start_time = time_util::now_ms();
+            pub->last_stats_log = pub->stats.start_time;
             
             Logger::info("Publisher started: ", pub->stream_id.to_string());
             
@@ -235,6 +279,8 @@ void RelayManager::handle_publisher_command(Publisher* pub, const rtmp::CommandM
             response.arguments.push_back(amf0::Value::Object(info));
             
             pub->session->send_command(response);
+            Logger::debug("Sending onStatus for publish");
+            flush_publisher_responses(pub);
             
             create_pusher(pub->stream_id);
         }
@@ -245,6 +291,34 @@ void RelayManager::remove_publisher(Publisher* pub) {
     if (publishers_.count(pub)) {
         loop_.remove(pub->socket.fd());
         publishers_.erase(pub);
+    }
+}
+
+void RelayManager::log_stats(Publisher* pub) {
+    uint64_t elapsed = time_util::now_ms() - pub->stats.start_time;
+    double elapsed_sec = elapsed / 1000.0;
+    if (elapsed_sec > 0) {
+        double bitrate = (pub->stats.audio_bytes + pub->stats.video_bytes) * 8 / elapsed_sec / 1000.0;
+        Logger::info("Stats: audio=", pub->stats.audio_messages, 
+                     " video=", pub->stats.video_messages,
+                     " (", pub->stats.keyframes, " keyframes)",
+                     " data=", pub->stats.data_messages,
+                     " total_bytes=", pub->stats.audio_bytes + pub->stats.video_bytes,
+                     " duration=", elapsed_sec, "s",
+                     " bitrate=", bitrate, " kbps");
+    }
+}
+
+void RelayManager::flush_publisher_responses(Publisher* pub) {
+    auto data = pub->session->get_outgoing_data();
+    if (!data.empty()) {
+        Logger::debug("Flushing ", data.size(), " bytes to publisher socket");
+        auto write_result = pub->socket.write(data.data(), data.size());
+        if (write_result.is_err()) {
+            Logger::error("Write failed: ", write_result.error());
+        } else {
+            Logger::debug("Wrote ", write_result.value(), " bytes to publisher");
+        }
     }
 }
 
