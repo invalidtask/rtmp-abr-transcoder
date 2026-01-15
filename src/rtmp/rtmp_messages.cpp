@@ -1,5 +1,6 @@
 #include "rtmp/rtmp_messages.hpp"
 #include "core/bytes.hpp"
+#include "core/log.hpp"
 
 namespace rtmp {
 
@@ -75,6 +76,10 @@ std::optional<CommandMessage> CommandMessage::parse(const std::vector<uint8_t>& 
     for (size_t i = 2; i < values.size(); ++i) {
         cmd.arguments.push_back(values[i]);
     }
+    
+    Logger::debug("AMF0 command name: '", cmd.name, "'");
+    Logger::debug("AMF0 transaction id: ", cmd.transaction_id);
+    Logger::debug("AMF0 arguments: ", cmd.arguments.size());
     
     return cmd;
 }

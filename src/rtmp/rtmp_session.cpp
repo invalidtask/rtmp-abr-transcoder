@@ -10,6 +10,8 @@ Result<size_t> Session::process_input(std::span<const uint8_t> data) {
         return Result<size_t>::Err("Handshake not complete");
     }
     
+    Logger::debug("Parsing chunks from ", data.size(), " bytes");
+    
     size_t consumed = 0;
     auto chunks_result = parser_.parse(data, consumed);
     
@@ -17,12 +19,19 @@ Result<size_t> Session::process_input(std::span<const uint8_t> data) {
         return Result<size_t>::Err(chunks_result.error());
     }
     
+    Logger::debug("Parsed ", chunks_result.value().size(), " complete messages");
+    
     for (const auto& chunk : chunks_result.value()) {
         Message msg;
         msg.type_id = chunk.header.message_type_id;
         msg.timestamp = chunk.header.timestamp;
         msg.stream_id = chunk.header.message_stream_id;
         msg.payload = chunk.payload;
+        
+        Logger::debug("Message type: ", static_cast<int>(msg.type_id),
+                      ", timestamp: ", msg.timestamp,
+                      ", stream_id: ", msg.stream_id,
+                      ", payload: ", msg.payload.size(), " bytes");
         
         if (msg.type_id == static_cast<uint8_t>(MessageType::SetChunkSize)) {
             auto parsed = SetChunkSizeMessage::parse(msg.payload);

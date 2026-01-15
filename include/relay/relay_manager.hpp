@@ -10,6 +10,16 @@
 
 namespace relay {
 
+struct SinkStats {
+    uint64_t audio_messages = 0;
+    uint64_t video_messages = 0;
+    uint64_t data_messages = 0;
+    uint64_t audio_bytes = 0;
+    uint64_t video_bytes = 0;
+    uint64_t keyframes = 0;
+    uint64_t start_time = 0;
+};
+
 class RelayManager {
 public:
     explicit RelayManager(EpollLoop& loop, const RelayPolicy& policy);
@@ -28,6 +38,8 @@ private:
         StreamId stream_id;
         bool ready = false;
         std::vector<rtmp::Message> pending_messages;
+        SinkStats stats;
+        uint64_t last_stats_log = 0;
     };
     
     struct Pusher {
@@ -45,6 +57,8 @@ private:
     void handle_publisher_command(Publisher* pub, const rtmp::CommandMessage& cmd);
     void setup_publisher_read(Publisher* pub);
     void remove_publisher(Publisher* pub);
+    void log_stats(Publisher* pub);
+    void flush_publisher_responses(Publisher* pub);
     
     void create_pusher(const StreamId& stream_id);
     void handle_pusher_connected(Pusher* pusher);
