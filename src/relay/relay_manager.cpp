@@ -88,11 +88,18 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
                              ", consumed: ", consumed, " bytes, total read: ", read_result.value());
                 
                 // After receiving C0+C1, send S0+S1+S2
+                // Note: Buffer is guaranteed to have at least 1537 bytes here because
+                // process_client_handshake() validated this before setting state to S0S1S2Sent
                 if (hs.state() == rtmp::Handshake::State::S0S1S2Sent) {
                     auto response = pub->session->generate_server_handshake_response(
                         std::span<const uint8_t>(buffer + 1, 1536)
                     );
-                    pub->socket.write(response.data(), response.size());
+                    auto write_result = pub->socket.write(response.data(), response.size());
+                    if (write_result.is_err()) {
+                        Logger::error("Failed to write handshake response: ", write_result.error());
+                        remove_publisher(pub);
+                        return;
+                    }
                 }
                 
                 // Only send protocol messages AFTER handshake is fully complete
@@ -105,7 +112,12 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
                     // Flush the protocol messages immediately
                     auto data = pub->session->get_outgoing_data();
                     if (!data.empty()) {
-                        pub->socket.write(data.data(), data.size());
+                        auto write_result = pub->socket.write(data.data(), data.size());
+                        if (write_result.is_err()) {
+                            Logger::error("Failed to write protocol messages: ", write_result.error());
+                            remove_publisher(pub);
+                            return;
+                        }
                     }
                 }
                 
