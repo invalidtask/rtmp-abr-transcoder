@@ -72,34 +72,57 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
             }
             
             if (!pub->session->handshake_done()) {
-                auto handshake_result = pub->session->handshake().process_client_handshake(
+                auto& hs = pub->session->handshake();
+                auto handshake_result = hs.process_client_handshake(
                     std::span<const uint8_t>(buffer, read_result.value())
                 );
                 
-                if (handshake_result.is_ok()) {
-                    size_t consumed = handshake_result.value();
-                    
+                if (handshake_result.is_err()) {
+                    Logger::error("Handshake failed: ", handshake_result.error());
+                    remove_publisher(pub);
+                    return;
+                }
+                
+                size_t consumed = handshake_result.value();
+                Logger::debug("Handshake state: ", static_cast<int>(hs.state()), 
+                             ", consumed: ", consumed, " bytes, total read: ", read_result.value());
+                
+                // After receiving C0+C1, send S0+S1+S2
+                if (hs.state() == rtmp::Handshake::State::S0S1S2Sent) {
                     auto response = pub->session->generate_server_handshake_response(
                         std::span<const uint8_t>(buffer + 1, 1536)
                     );
-                    
                     pub->socket.write(response.data(), response.size());
-                    
+                }
+                
+                // Only send protocol messages AFTER handshake is fully complete
+                if (hs.is_done()) {
+                    Logger::debug("Handshake complete, sending protocol messages");
                     pub->session->send_window_ack_size(2500000);
                     pub->session->send_set_peer_bandwidth(2500000, 2);
                     pub->session->send_set_chunk_size(4096);
                     
-                    if (consumed < read_result.value()) {
-                        auto process_result = pub->session->process_input(
-                            std::span<const uint8_t>(buffer + consumed, read_result.value() - consumed)
-                        );
+                    // Flush the protocol messages immediately
+                    auto data = pub->session->get_outgoing_data();
+                    if (!data.empty()) {
+                        pub->socket.write(data.data(), data.size());
                     }
                 }
-            } else {
-                auto process_result = pub->session->process_input(
-                    std::span<const uint8_t>(buffer, read_result.value())
-                );
+                
+                // Process any remaining data after handshake
+                if (hs.is_done() && consumed < read_result.value()) {
+                    auto process_result = pub->session->process_input(
+                        std::span<const uint8_t>(buffer + consumed, read_result.value() - consumed)
+                    );
+                }
+                
+                return;  // Don't process RTMP messages until handshake is done
             }
+            
+            // Normal message processing after handshake complete
+            auto process_result = pub->session->process_input(
+                std::span<const uint8_t>(buffer, read_result.value())
+            );
         }
         
         if (events & EPOLLOUT) {
