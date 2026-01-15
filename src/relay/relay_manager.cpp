@@ -114,6 +114,11 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
                     auto process_result = pub->session->process_input(
                         std::span<const uint8_t>(buffer + consumed, read_result.value() - consumed)
                     );
+                    if (process_result.is_err()) {
+                        Logger::error("Failed to process input after handshake: ", process_result.error());
+                        remove_publisher(pub);
+                        return;
+                    }
                 }
                 
                 return;  // Don't process RTMP messages until handshake is done
@@ -123,6 +128,11 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
             auto process_result = pub->session->process_input(
                 std::span<const uint8_t>(buffer, read_result.value())
             );
+            if (process_result.is_err()) {
+                Logger::error("Failed to process input: ", process_result.error());
+                remove_publisher(pub);
+                return;
+            }
         }
         
         if (events & EPOLLOUT) {
