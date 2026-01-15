@@ -185,9 +185,11 @@ Result<std::vector<Chunk>> ChunkParser::parse(std::span<const uint8_t> data, siz
             chunk.payload = std::move(state.partial_message);
             
             // Check for SetChunkSize message and update chunk size immediately
-            if (header.message_type_id == 1) {
+            if (header.message_type_id == static_cast<uint8_t>(MessageType::SetChunkSize)) {
                 auto msg = SetChunkSizeMessage::parse(chunk.payload);
-                if (msg && msg->chunk_size > 0) {
+                // RTMP spec allows up to 0x7FFFFFFF, but we limit to 16MB for safety
+                constexpr uint32_t MAX_CHUNK_SIZE = 16 * 1024 * 1024;
+                if (msg && msg->chunk_size > 0 && msg->chunk_size <= MAX_CHUNK_SIZE) {
                     chunk_size_ = msg->chunk_size;
                     Logger::debug("Chunk parser updated chunk size to ", chunk_size_);
                 }
