@@ -74,6 +74,7 @@ int main(int argc, char** argv) {
     
     Logger::info("Server started successfully");
     
+    loop.start();
     while (loop.is_running()) {
         auto result = loop.run_once(100);
         if (result.is_err()) {

@@ -26,6 +26,7 @@ public:
     Result<void> remove(int fd);
     
     Result<void> run_once(int timeout_ms = -1);
+    void start();
     void stop();
     
     bool is_running() const { return running_; }

@@ -52,8 +52,6 @@ Result<void> EpollLoop::remove(int fd) {
 }
 
 Result<void> EpollLoop::run_once(int timeout_ms) {
-    running_ = true;
-    
     epoll_event events[32];
     int nfds = epoll_wait(epoll_fd_, events, 32, timeout_ms);
     
@@ -73,6 +71,10 @@ Result<void> EpollLoop::run_once(int timeout_ms) {
     }
     
     return Result<void>::Ok();
+}
+
+void EpollLoop::start() {
+    running_ = true;
 }
 
 void EpollLoop::stop() {

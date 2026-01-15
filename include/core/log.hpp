@@ -25,7 +25,7 @@ public:
         if (get_level() <= LogLevel::Debug) {
             std::ostringstream oss;
             (oss << ... << args);
-            debug(oss.str());
+            debug(std::string_view(oss.str()));
         }
     }
     
@@ -34,7 +34,7 @@ public:
         if (get_level() <= LogLevel::Info) {
             std::ostringstream oss;
             (oss << ... << args);
-            info(oss.str());
+            info(std::string_view(oss.str()));
         }
     }
     
@@ -43,7 +43,7 @@ public:
         if (get_level() <= LogLevel::Warn) {
             std::ostringstream oss;
             (oss << ... << args);
-            warn(oss.str());
+            warn(std::string_view(oss.str()));
         }
     }
     
@@ -51,6 +51,6 @@ public:
     static void error(Args&&... args) {
         std::ostringstream oss;
         (oss << ... << args);
-        error(oss.str());
+        error(std::string_view(oss.str()));
     }
 };
