@@ -1,4 +1,5 @@
 #include "rtmp/rtmp_chunks.hpp"
+#include "rtmp/rtmp_messages.hpp"
 #include "core/bytes.hpp"
 #include "core/log.hpp"
 #include <algorithm>
@@ -184,11 +185,11 @@ Result<std::vector<Chunk>> ChunkParser::parse(std::span<const uint8_t> data, siz
             chunk.payload = std::move(state.partial_message);
             
             // Check for SetChunkSize message and update chunk size immediately
-            if (header.message_type_id == 1 && chunk.payload.size() == 4) {
-                uint32_t new_size = bytes::read_u32_be(chunk.payload.data());
-                if (new_size > 0 && new_size <= 0xFFFFFF) {
-                    chunk_size_ = new_size;
-                    Logger::debug("Chunk parser updated chunk size to ", new_size);
+            if (header.message_type_id == 1) {
+                auto msg = SetChunkSizeMessage::parse(chunk.payload);
+                if (msg && msg->chunk_size > 0) {
+                    chunk_size_ = msg->chunk_size;
+                    Logger::debug("Chunk parser updated chunk size to ", chunk_size_);
                 }
             }
             
