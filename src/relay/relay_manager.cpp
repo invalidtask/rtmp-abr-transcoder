@@ -88,9 +88,9 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
                              ", consumed: ", consumed, " bytes, total read: ", read_result.value());
                 
                 // After receiving C0+C1, send S0+S1+S2
-                // Note: Buffer is guaranteed to have at least 1537 bytes here because
-                // process_client_handshake() validated this before setting state to S0S1S2Sent
-                if (hs.state() == rtmp::Handshake::State::S0S1S2Sent && consumed >= 1537) {
+                // When state is S0S1S2Sent, process_client_handshake() has validated that
+                // the input span had at least 1537 bytes (C0+C1). Double-check for safety.
+                if (hs.state() == rtmp::Handshake::State::S0S1S2Sent && read_result.value() >= 1537) {
                     auto response = pub->session->generate_server_handshake_response(
                         std::span<const uint8_t>(buffer + 1, 1536)
                     );
