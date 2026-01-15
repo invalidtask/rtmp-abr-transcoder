@@ -182,6 +182,16 @@ Result<std::vector<Chunk>> ChunkParser::parse(std::span<const uint8_t> data, siz
             Chunk chunk;
             chunk.header = header;
             chunk.payload = std::move(state.partial_message);
+            
+            // Check for SetChunkSize message and update chunk size immediately
+            if (header.message_type_id == 1 && chunk.payload.size() == 4) {
+                uint32_t new_size = bytes::read_u32_be(chunk.payload.data());
+                if (new_size > 0 && new_size <= 0xFFFFFF) {
+                    chunk_size_ = new_size;
+                    Logger::debug("Chunk parser updated chunk size to ", new_size);
+                }
+            }
+            
             chunks.push_back(std::move(chunk));
             
             state.bytes_received = 0;
