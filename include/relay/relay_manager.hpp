@@ -8,6 +8,10 @@
 #include <map>
 #include <string>
 
+namespace transcode {
+    class Transcoder;
+}
+
 namespace relay {
 
 struct SinkStats {
@@ -26,6 +30,7 @@ public:
     
     void set_push_url(const std::string& url);
     void set_push_template(const std::string& tmpl);
+    void set_transcoder(std::shared_ptr<transcode::Transcoder> transcoder);
     
     Result<void> start_server(const std::string& addr, uint16_t port);
     
@@ -72,6 +77,7 @@ private:
     RelayPolicy policy_;
     std::string push_url_;
     std::string push_template_;
+    std::shared_ptr<transcode::Transcoder> transcoder_;
     
     std::unique_ptr<rtmp::Server> server_;
     std::map<Publisher*, std::unique_ptr<Publisher>> publishers_;

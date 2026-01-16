@@ -23,6 +23,12 @@ set(LIB_SOURCES
     ../src/relay/stream_id.cpp
     ../src/relay/policy.cpp
     ../src/relay/relay_manager.cpp
+    ../src/transcode/decoder_openh264.cpp
+    ../src/transcode/decoder_fdk_aac.cpp
+    ../src/transcode/encoder_openh264.cpp
+    ../src/transcode/encoder_fdk_aac.cpp
+    ../src/transcode/scaler_libyuv.cpp
+    ../src/transcode/transcoder.cpp
 )
 
 add_executable(rtmp_abr_tests
@@ -30,4 +36,16 @@ add_executable(rtmp_abr_tests
     ${LIB_SOURCES}
 )
 
-target_link_libraries(rtmp_abr_tests pthread)
+target_link_libraries(rtmp_abr_tests 
+    pthread
+    ${OPENH264_LIBRARIES}
+    ${FDK_AAC_LIBRARIES}
+    ${LIBYUV_LIBRARIES}
+)
+
+target_include_directories(rtmp_abr_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${OPENH264_INCLUDE_DIRS}
+    ${FDK_AAC_INCLUDE_DIRS}
+    ${LIBYUV_INCLUDE_DIRS}
+)

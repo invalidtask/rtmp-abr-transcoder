@@ -1,0 +1,68 @@
+#pragma once
+#include "decoder.hpp"
+#include "encoder.hpp"
+#include "scaler.hpp"
+#include "rtmp/rtmp_client.hpp"
+#include "net/epoll_loop.hpp"
+#include <functional>
+
+namespace transcode {
+
+struct OutputConfig {
+    std::string name;  // "720p", "360p"
+    int width;
+    int height;
+    int video_bitrate_kbps;
+    int audio_bitrate_kbps;
+    std::string rtmp_url;
+};
+
+class Transcoder {
+public:
+    Transcoder(EpollLoop& loop);
+    ~Transcoder();
+    
+    bool add_output(const OutputConfig& config);
+    
+    // Called when source stream metadata is available
+    void on_source_metadata(int width, int height, int fps, int sample_rate, int channels);
+    
+    // Called for each incoming media message
+    void on_video_data(const uint8_t* data, size_t size, uint32_t timestamp, bool keyframe);
+    void on_audio_data(const uint8_t* data, size_t size, uint32_t timestamp);
+    
+    // Start/stop transcoding
+    bool start();
+    void stop();
+    
+private:
+    struct Output {
+        OutputConfig config;
+        std::unique_ptr<Scaler> scaler;
+        std::unique_ptr<H264Encoder> video_encoder;
+        std::unique_ptr<AACEncoder> audio_encoder;
+        std::unique_ptr<rtmp::Client> pusher;
+        bool connected = false;
+        bool publishing = false;
+        bool video_initialized = false;
+        bool audio_initialized = false;
+    };
+    
+    void process_video_frame(const VideoFrame& frame);
+    void process_audio_frame(const AudioFrame& frame);
+    void push_video_packet(Output& output, const EncodedPacket& packet);
+    void push_audio_packet(Output& output, const EncodedPacket& packet);
+    
+    EpollLoop& loop_;
+    std::unique_ptr<H264Decoder> video_decoder_;
+    std::unique_ptr<AACDecoder> audio_decoder_;
+    std::vector<std::unique_ptr<Output>> outputs_;
+    
+    int source_width_ = 0;
+    int source_height_ = 0;
+    int source_fps_ = 30;
+    int source_sample_rate_ = 44100;
+    int source_channels_ = 2;
+};
+
+}
