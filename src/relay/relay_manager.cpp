@@ -464,7 +464,7 @@ void RelayManager::handle_pusher_message(Pusher* pusher, const rtmp::Message& ms
 void RelayManager::handle_pusher_disconnected(Pusher* pusher) {
     Logger::warn("Pusher disconnected for ", pusher->stream_id.to_string());
     
-    // Mark for reconnect, don't access pusher after this
+    // Save values before resetting client
     StreamId stream_id = pusher->stream_id;
     uint32_t delay_ms = pusher->reconnect_delay_ms;
     
@@ -489,7 +489,7 @@ void RelayManager::handle_pusher_disconnected(Pusher* pusher) {
         handle_pusher_disconnected(pusher);
     });
     
-    // Update reconnect delay with exponential backoff
+    // Update reconnect delay with exponential backoff (for tracking/future timer support)
     pusher->reconnect_delay_ms = std::min(delay_ms * 2, 5000u);
     
     // Reconnect
@@ -515,8 +515,8 @@ void RelayManager::handle_pusher_disconnected(Pusher* pusher) {
     
     Logger::info("Reconnecting pusher to ", host, ":", port);
     
-    // Note: Immediate reconnection (no delay) as event loop doesn't have timer support
-    // The exponential backoff delay is calculated but not enforced here
+    // Note: Immediate reconnection (no delay enforced) as event loop lacks timer support
+    // The exponential backoff delay is tracked for monitoring/debugging purposes
     auto connect_result = pusher->client->connect(host, port);
     if (connect_result.is_err()) {
         Logger::error("Pusher reconnect failed: ", connect_result.error());
