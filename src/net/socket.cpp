@@ -3,6 +3,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
@@ -147,18 +148,57 @@ void Socket::close() {
 }
 
 Result<std::pair<std::string, uint16_t>> Socket::parse_address(const std::string& addr_port) {
+    std::string hostname;
+    uint16_t port = 1935;  // Default RTMP port
+    
     size_t colon_pos = addr_port.rfind(':');
     if (colon_pos == std::string::npos) {
-        return Result<std::pair<std::string, uint16_t>>::Err("Invalid address format");
+        // No port specified, use hostname as-is with default port
+        hostname = addr_port;
+    } else {
+        // Port specified
+        hostname = addr_port.substr(0, colon_pos);
+        std::string port_str = addr_port.substr(colon_pos + 1);
+        
+        try {
+            port = static_cast<uint16_t>(std::stoi(port_str));
+        } catch (...) {
+            return Result<std::pair<std::string, uint16_t>>::Err("Invalid port number");
+        }
     }
     
-    std::string addr = addr_port.substr(0, colon_pos);
-    std::string port_str = addr_port.substr(colon_pos + 1);
+    // Try to resolve hostname to IP address using getaddrinfo
+    addrinfo hints{};
+    hints.ai_family = AF_INET;  // IPv4
+    hints.ai_socktype = SOCK_STREAM;
     
-    try {
-        uint16_t port = static_cast<uint16_t>(std::stoi(port_str));
-        return Result<std::pair<std::string, uint16_t>>(std::make_pair(addr, port));
-    } catch (...) {
-        return Result<std::pair<std::string, uint16_t>>::Err("Invalid port number");
+    addrinfo* result = nullptr;
+    int ret = getaddrinfo(hostname.c_str(), nullptr, &hints, &result);
+    
+    if (ret != 0) {
+        return Result<std::pair<std::string, uint16_t>>::Err(
+            "Failed to resolve hostname: " + std::string(gai_strerror(ret))
+        );
     }
+    
+    // Get the first IPv4 address
+    std::string ip_addr;
+    for (addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+        if (rp->ai_family == AF_INET) {
+            sockaddr_in* addr_in = reinterpret_cast<sockaddr_in*>(rp->ai_addr);
+            char addr_buf[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &addr_in->sin_addr, addr_buf, sizeof(addr_buf))) {
+                ip_addr = addr_buf;
+                break;
+            }
+        }
+    }
+    
+    freeaddrinfo(result);
+    
+    if (ip_addr.empty()) {
+        return Result<std::pair<std::string, uint16_t>>::Err("No IPv4 address found for hostname");
+    }
+    
+    return Result<std::pair<std::string, uint16_t>>(std::make_pair(ip_addr, port));
 }

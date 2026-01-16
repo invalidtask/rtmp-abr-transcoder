@@ -140,20 +140,35 @@ Result<std::pair<ChunkHeader, size_t>> ChunkParser::parse_header(
 
 Result<std::vector<Chunk>> ChunkParser::parse(std::span<const uint8_t> data, size_t& consumed) {
     std::vector<Chunk> chunks;
-    size_t offset = 0;
     
-    while (offset < data.size()) {
-        auto header_result = parse_header(data.subspan(offset), 0);
+    // Combine buffered data with new data
+    std::vector<uint8_t> combined_data;
+    combined_data.reserve(buffer_.size() + data.size());
+    combined_data.insert(combined_data.end(), buffer_.begin(), buffer_.end());
+    combined_data.insert(combined_data.end(), data.begin(), data.end());
+    
+    size_t offset = 0;
+    size_t last_good_offset = 0;
+    
+    while (offset < combined_data.size()) {
+        auto header_result = parse_header(std::span<const uint8_t>(combined_data.data() + offset, combined_data.size() - offset), 0);
         if (header_result.is_err()) {
-            if (chunks.empty() && offset == 0) {
+            std::string error = header_result.error();
+            // Check if it's a "not enough data" error
+            bool is_incomplete = (error.find("Not enough data") != std::string::npos) || 
+                                (error.find("Empty data") != std::string::npos);
+            
+            if (!is_incomplete && chunks.empty() && offset == 0 && buffer_.empty()) {
+                // This is truly an error - malformed data from the start
                 consumed = 0;
-                return Result<std::vector<Chunk>>::Err(header_result.error());
+                buffer_.clear();
+                return Result<std::vector<Chunk>>::Err(error);
             }
+            // Otherwise, just break and buffer the remaining data
             break;
         }
         
         auto [header, header_size] = header_result.value();
-        offset += header_size;
         
         auto& state = streams_[header.chunk_stream_id];
         
@@ -167,17 +182,27 @@ Result<std::vector<Chunk>> ChunkParser::parse(std::span<const uint8_t> data, siz
             header.message_length - state.bytes_received
         );
         
-        if (offset + bytes_to_read > data.size()) {
+        // Check if we have enough data for payload chunk
+        // offset is currently pointing at the start of the header
+        // We need header_size + bytes_to_read bytes total from offset
+        if (offset + header_size + bytes_to_read > combined_data.size()) {
+            // Not enough data - don't consume the header, keep it buffered
             break;
         }
         
+        // We have enough data, consume the header
+        offset += header_size;
+        
         state.partial_message.insert(
             state.partial_message.end(),
-            data.data() + offset,
-            data.data() + offset + bytes_to_read
+            combined_data.data() + offset,
+            combined_data.data() + offset + bytes_to_read
         );
         offset += bytes_to_read;
         state.bytes_received += bytes_to_read;
+        
+        // Update last good offset after successfully consuming this chunk
+        last_good_offset = offset;
         
         if (state.bytes_received >= header.message_length) {
             Chunk chunk;
@@ -211,7 +236,21 @@ Result<std::vector<Chunk>> ChunkParser::parse(std::span<const uint8_t> data, siz
         }
     }
     
-    consumed = offset;
+    // Calculate how much of the new data was consumed
+    if (last_good_offset >= buffer_.size()) {
+        consumed = last_good_offset - buffer_.size();
+    } else {
+        consumed = 0;
+    }
+    
+    // Save unconsumed data to buffer
+    buffer_.clear();
+    if (last_good_offset < combined_data.size()) {
+        buffer_.insert(buffer_.end(), 
+                      combined_data.data() + last_good_offset,
+                      combined_data.data() + combined_data.size());
+    }
+    
     return Result<std::vector<Chunk>>(std::move(chunks));
 }
 
