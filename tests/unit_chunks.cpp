@@ -208,3 +208,121 @@ TEST_CASE(chunk_parse_set_chunk_size_then_large_message) {
     // Verify parser chunk size was updated
     REQUIRE_EQUAL(parser.get_chunk_size(), 4096);
 }
+
+TEST_CASE(chunk_parse_partial_header_across_reads) {
+    // This test simulates the case where a chunk header is split across two reads
+    rtmp::ChunkParser parser(128);
+    
+    // Create a message with fmt=0, csid=3, 100 bytes payload
+    std::vector<uint8_t> full_data;
+    full_data.push_back(0x03);  // fmt=0, csid=3
+    
+    uint8_t timestamp[3] = {0, 0, 100};
+    full_data.insert(full_data.end(), timestamp, timestamp + 3);
+    
+    uint8_t length[3] = {0, 0, 100};
+    full_data.insert(full_data.end(), length, length + 3);
+    
+    full_data.push_back(0x14);  // message type
+    
+    uint8_t stream_id[4] = {0, 0, 0, 0};
+    full_data.insert(full_data.end(), stream_id, stream_id + 4);
+    
+    for (int i = 0; i < 100; ++i) {
+        full_data.push_back(static_cast<uint8_t>(i));
+    }
+    
+    // Split the data in the middle of the header (after 5 bytes)
+    std::vector<uint8_t> part1(full_data.begin(), full_data.begin() + 5);
+    std::vector<uint8_t> part2(full_data.begin() + 5, full_data.end());
+    
+    // First read - partial header
+    size_t consumed1 = 0;
+    auto result1 = parser.parse(part1, consumed1);
+    REQUIRE(result1.is_ok());
+    REQUIRE_EQUAL(result1.value().size(), 0);  // No complete chunks yet
+    REQUIRE_EQUAL(consumed1, 0);  // Nothing consumed from new data (all buffered)
+    
+    // Second read - rest of header and payload
+    size_t consumed2 = 0;
+    auto result2 = parser.parse(part2, consumed2);
+    REQUIRE(result2.is_ok());
+    REQUIRE_EQUAL(result2.value().size(), 1);  // Now we have a complete chunk
+    REQUIRE_EQUAL(consumed2, part2.size());  // All of part2 consumed
+    
+    auto& chunk = result2.value()[0];
+    REQUIRE_EQUAL(chunk.header.chunk_stream_id, 3);
+    REQUIRE_EQUAL(chunk.header.timestamp, 100);
+    REQUIRE_EQUAL(chunk.header.message_length, 100);
+    REQUIRE_EQUAL(chunk.payload.size(), 100);
+}
+
+TEST_CASE(chunk_parse_partial_payload_across_reads) {
+    // Simpler test: 150-byte message split across 2 reads with chunk_size=128
+    rtmp::ChunkParser parser(128);
+    
+    std::vector<uint8_t> full_data;
+    
+    // First chunk: fmt=0 header + 128 bytes payload
+    full_data.push_back(0x03);  // fmt=0, csid=3
+    
+    uint8_t timestamp[3] = {0, 0, 50};
+    full_data.insert(full_data.end(), timestamp, timestamp + 3);
+    
+    uint8_t length[3] = {0, 0, 150};  // 150 bytes total
+    full_data.insert(full_data.end(), length, length + 3);
+    
+    full_data.push_back(0x08);  // message type
+    
+    uint8_t stream_id[4] = {1, 0, 0, 0};
+    full_data.insert(full_data.end(), stream_id, stream_id + 4);
+    
+    // First 128 bytes of payload
+    for (int i = 0; i < 128; ++i) {
+        full_data.push_back(static_cast<uint8_t>(i));
+    }
+    
+    // Second chunk: fmt=3 header + 22 bytes (rest of message)
+    full_data.push_back(0xC3);  // fmt=3, csid=3
+    for (int i = 128; i < 150; ++i) {
+        full_data.push_back(static_cast<uint8_t>(i));
+    }
+    
+    // Split into 2 reads: give first chunk + half of second chunk in read1
+    // Then rest in read2
+    size_t split = 12 + 128 + 1 + 10;  // first chunk complete + partial second chunk
+    
+    std::vector<uint8_t> read1(full_data.begin(), full_data.begin() + split);
+    std::vector<uint8_t> read2(full_data.begin() + split, full_data.end());
+    
+    // First read
+    size_t consumed1 = 0;
+    auto result1 = parser.parse(read1, consumed1);
+    REQUIRE(result1.is_ok());
+    
+    // Second read
+    size_t consumed2 = 0;
+    auto result2 = parser.parse(read2, consumed2);
+    REQUIRE(result2.is_ok());
+    
+    // Should get exactly one complete message total
+    size_t total_chunks = result1.value().size() + result2.value().size();
+    REQUIRE_EQUAL(total_chunks, 1);
+    
+    // Find the chunk
+    const rtmp::Chunk* chunk_ptr = nullptr;
+    if (!result1.value().empty()) {
+        chunk_ptr = &result1.value()[0];
+    } else {
+        chunk_ptr = &result2.value()[0];
+    }
+    
+    REQUIRE_EQUAL(chunk_ptr->header.chunk_stream_id, 3);
+    REQUIRE_EQUAL(chunk_ptr->header.timestamp, 50);
+    REQUIRE_EQUAL(chunk_ptr->payload.size(), 150);
+    
+    // Verify payload content
+    for (int i = 0; i < 150; ++i) {
+        REQUIRE_EQUAL(chunk_ptr->payload[i], static_cast<uint8_t>(i));
+    }
+}

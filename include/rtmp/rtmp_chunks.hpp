@@ -49,6 +49,7 @@ private:
     
     uint32_t chunk_size_;
     std::map<uint32_t, StreamState> streams_;
+    std::vector<uint8_t> buffer_;  // Buffer for unconsumed data between parse calls
 };
 
 std::vector<uint8_t> encode_chunk(
