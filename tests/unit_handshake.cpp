@@ -125,12 +125,45 @@ TEST_CASE(handshake_generate_c2_echoes_s1) {
     auto c2 = handshake.generate_c2(std::span<const uint8_t>(s1_data.data(), s1_data.size()));
     
     REQUIRE_EQUAL(c2.size(), 1536);
-    REQUIRE_EQUAL(handshake.state(), rtmp::Handshake::State::C2Sent);
+    REQUIRE_EQUAL(handshake.state(), rtmp::Handshake::State::Done);
     
     // Verify C2 is exact echo of S1
     for (size_t i = 0; i < 1536; ++i) {
         REQUIRE_EQUAL(c2[i], s1_data[i]);
     }
+}
+
+// Test that is_done() returns true after C2 generation
+TEST_CASE(handshake_is_done_after_c2) {
+    rtmp::Handshake handshake;
+    
+    // Generate C0+C1
+    auto c0c1 = handshake.generate_c0_c1();
+    REQUIRE_EQUAL(handshake.state(), rtmp::Handshake::State::C0C1Sent);
+    REQUIRE(!handshake.is_done());
+    
+    // Process server handshake
+    std::vector<uint8_t> s0s1s2(3073);
+    s0s1s2[0] = 3;
+    for (size_t i = 1; i < 3073; ++i) {
+        s0s1s2[i] = static_cast<uint8_t>(i % 256);
+    }
+    
+    auto result = handshake.process_server_handshake(
+        std::span<const uint8_t>(s0s1s2.data(), s0s1s2.size())
+    );
+    REQUIRE(result.is_ok());
+    REQUIRE_EQUAL(handshake.state(), rtmp::Handshake::State::Done);
+    REQUIRE(handshake.is_done());
+    
+    // Generate C2 - should remain Done
+    auto c2 = handshake.generate_c2(
+        std::span<const uint8_t>(handshake.s1_data())
+    );
+    
+    REQUIRE_EQUAL(c2.size(), 1536);
+    REQUIRE_EQUAL(handshake.state(), rtmp::Handshake::State::Done);
+    REQUIRE(handshake.is_done());
 }
 
 // Test accessors for c1_data and s1_data
