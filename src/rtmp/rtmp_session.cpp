@@ -42,6 +42,7 @@ Result<size_t> Session::process_input(std::span<const uint8_t> data) {
         }
         
         if (message_callback_) {
+            Logger::debug("Calling message callback for type ", static_cast<int>(msg.type_id));
             message_callback_(msg);
         }
     }
