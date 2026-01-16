@@ -151,7 +151,7 @@ void Client::handle_readable() {
     read_buffer_.insert(read_buffer_.end(), buffer, buffer + bytes_read);
     Logger::debug("Read buffer now contains ", read_buffer_.size(), " bytes");
     
-    if (!session_->handshake_done()) {
+    if (!connected_) {
         // Per RTMP spec: S0+S1+S2 = 1 + 1536 + 1536 = 3073 bytes
         // Must wait until we have all 3073 bytes
         Logger::debug("Processing server handshake, buffer has ", read_buffer_.size(), " bytes");

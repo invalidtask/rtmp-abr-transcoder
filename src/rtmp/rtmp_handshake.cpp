@@ -57,7 +57,7 @@ std::vector<uint8_t> Handshake::generate_s0_s1_s2(std::span<const uint8_t> c1) {
 std::vector<uint8_t> Handshake::generate_c2(std::span<const uint8_t> s1) {
     std::vector<uint8_t> data(1536);
     std::memcpy(data.data(), s1.data(), 1536);
-    state_ = State::C2Sent;
+    state_ = State::Done;  // Client handshake is complete after C2 generated
     return data;
 }
 
