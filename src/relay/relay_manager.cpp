@@ -426,7 +426,6 @@ void RelayManager::handle_pusher_message(Pusher* pusher, const rtmp::Message& ms
             Logger::debug("Pusher received command: ", cmd->name, ", txn_id: ", cmd->transaction_id);
             
             if (cmd->name == "_result" && !pusher->publishing) {
-                Logger::debug("Received _result for txn_id: ", cmd->transaction_id);
                 if (cmd->transaction_id == 1) {
                     Logger::debug("Sending createStream command");
                     rtmp::CommandMessage create_stream;
