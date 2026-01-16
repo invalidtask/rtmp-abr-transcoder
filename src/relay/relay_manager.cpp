@@ -323,6 +323,8 @@ void RelayManager::flush_publisher_responses(Publisher* pub) {
 }
 
 void RelayManager::create_pusher(const StreamId& stream_id) {
+    Logger::info("Creating pusher for stream: ", stream_id.to_string());
+    
     if (push_url_.empty()) {
         Logger::warn("No push URL configured, running in sink mode");
         return;
@@ -335,6 +337,7 @@ void RelayManager::create_pusher(const StreamId& stream_id) {
     Pusher* pusher_ptr = pusher.get();
     
     pusher->client->set_connected_callback([this, pusher_ptr]() {
+        Logger::info("Pusher connected_callback fired for ", pusher_ptr->stream_id.to_string());
         handle_pusher_connected(pusher_ptr);
     });
     
@@ -371,11 +374,14 @@ void RelayManager::create_pusher(const StreamId& stream_id) {
     
     auto connect_result = pusher->client->connect(host, port);
     if (connect_result.is_err()) {
-        Logger::error("Failed to connect pusher: ", connect_result.error());
+        Logger::error("Pusher connect() returned error: ", connect_result.error());
         schedule_pusher_reconnect(pusher_ptr);
+    } else {
+        Logger::debug("Pusher connect() initiated successfully");
     }
     
     pushers_[stream_id] = std::move(pusher);
+    Logger::debug("Pusher added to map, total pushers: ", pushers_.size());
 }
 
 void RelayManager::handle_pusher_connected(Pusher* pusher) {
@@ -391,6 +397,8 @@ void RelayManager::handle_pusher_connected(Pusher* pusher) {
     size_t app_end = path.find('/', 1);
     std::string app = app_end != std::string::npos ? path.substr(1, app_end - 1) : path.substr(1);
     
+    Logger::debug("Sending RTMP connect command to app: ", app);
+    
     rtmp::CommandMessage connect_cmd;
     connect_cmd.name = "connect";
     connect_cmd.transaction_id = 1;
@@ -402,13 +410,16 @@ void RelayManager::handle_pusher_connected(Pusher* pusher) {
     connect_cmd.arguments.push_back(amf0::Value::Object(connect_obj));
     
     pusher->client->send_command(connect_cmd);
+    Logger::debug("Connect command sent, txn_id: 1");
 }
 
 void RelayManager::handle_pusher_message(Pusher* pusher, const rtmp::Message& msg) {
     if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::CommandAMF0)) {
         auto cmd = rtmp::CommandMessage::parse(msg.payload);
         if (cmd && cmd->name == "_result" && !pusher->publishing) {
+            Logger::debug("Received _result for txn_id: ", cmd->transaction_id);
             if (cmd->transaction_id == 1) {
+                Logger::debug("Sending createStream command");
                 rtmp::CommandMessage create_stream;
                 create_stream.name = "createStream";
                 create_stream.transaction_id = 2;
@@ -417,6 +428,7 @@ void RelayManager::handle_pusher_message(Pusher* pusher, const rtmp::Message& ms
                 pusher->client->send_command(create_stream);
             }
             else if (cmd->transaction_id == 2) {
+                Logger::debug("Sending publish command for stream: ", pusher->stream_id.stream);
                 rtmp::CommandMessage publish_cmd;
                 publish_cmd.name = "publish";
                 publish_cmd.transaction_id = 0;
@@ -429,6 +441,9 @@ void RelayManager::handle_pusher_message(Pusher* pusher, const rtmp::Message& ms
                 
                 Logger::info("Pusher publishing to ", pusher->stream_id.to_string());
                 
+                if (!pusher->buffer.empty()) {
+                    Logger::debug("Flushing ", pusher->buffer.size(), " buffered messages");
+                }
                 for (const auto& buffered_msg : pusher->buffer) {
                     pusher->client->send_message(buffered_msg);
                 }
@@ -457,6 +472,15 @@ void RelayManager::relay_message(Pusher* pusher, const rtmp::Message& msg) {
     }
     
     if (pusher->publishing) {
+        const char* type_name = "unknown";
+        if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::Audio)) {
+            type_name = "audio";
+        } else if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::Video)) {
+            type_name = "video";
+        } else if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::DataAMF0)) {
+            type_name = "data";
+        }
+        Logger::debug("Relaying ", type_name, " message to pusher, timestamp: ", msg.timestamp, ", size: ", msg.payload.size());
         pusher->client->send_message(msg);
     } else {
         pusher->pending_bytes += msg.payload.size();
@@ -466,14 +490,17 @@ void RelayManager::relay_message(Pusher* pusher, const rtmp::Message& msg) {
                 size_t dropped_size = pusher->buffer.front().payload.size();
                 pusher->buffer.erase(pusher->buffer.begin());
                 pusher->pending_bytes -= dropped_size;
+                Logger::debug("Dropped oldest message, pending: ", pusher->pending_bytes, " bytes");
             }
             else if (policy_.backpressure == BackpressurePolicy::DropNewest) {
                 pusher->pending_bytes -= msg.payload.size();
+                Logger::debug("Dropped newest message, pending: ", pusher->pending_bytes, " bytes");
                 return;
             }
         }
         
         pusher->buffer.push_back(msg);
+        Logger::debug("Buffering message (not yet publishing), pending: ", pusher->pending_bytes, " bytes, buffer size: ", pusher->buffer.size());
     }
 }
 
