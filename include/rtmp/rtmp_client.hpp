@@ -5,6 +5,7 @@
 #include "core/result.hpp"
 #include <memory>
 #include <functional>
+#include <vector>
 
 namespace rtmp {
 

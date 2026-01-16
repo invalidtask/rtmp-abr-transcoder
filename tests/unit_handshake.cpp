@@ -1,7 +1,6 @@
 #include "test_framework.hpp"
 #include "rtmp/rtmp_handshake.hpp"
 #include <vector>
-#include <cstring>
 
 // Test that handshake requires full S0+S1+S2 data (3073 bytes)
 TEST_CASE(handshake_server_requires_full_data) {
