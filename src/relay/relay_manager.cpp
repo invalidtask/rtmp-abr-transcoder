@@ -49,7 +49,7 @@ void RelayManager::handle_new_publisher(std::shared_ptr<rtmp::Session> session, 
 }
 
 void RelayManager::setup_publisher_read(Publisher* pub) {
-    loop_.add(pub->socket.fd(), EPOLLIN | EPOLLOUT, [this, pub](uint32_t events) {
+    loop_.add(pub->socket.fd(), EPOLLIN, [this, pub](uint32_t events) {
         if (events & (EPOLLERR | EPOLLHUP)) {
             remove_publisher(pub);
             return;
@@ -150,15 +150,6 @@ void RelayManager::setup_publisher_read(Publisher* pub) {
                 Logger::error("Failed to process input: ", process_result.error());
                 remove_publisher(pub);
                 return;
-            }
-        }
-        
-        if (events & EPOLLOUT) {
-            if (pub->session->has_outgoing_data()) {
-                auto data = pub->session->get_outgoing_data();
-                if (!data.empty()) {
-                    pub->socket.write(data.data(), data.size());
-                }
             }
         }
     });
@@ -472,11 +463,65 @@ void RelayManager::handle_pusher_message(Pusher* pusher, const rtmp::Message& ms
 void RelayManager::handle_pusher_disconnected(Pusher* pusher) {
     Logger::warn("Pusher disconnected for ", pusher->stream_id.to_string());
     
+    // Mark for reconnect, don't access pusher after this
+    StreamId stream_id = pusher->stream_id;
+    uint32_t delay_ms = pusher->reconnect_delay_ms;
+    
     pusher->connected = false;
     pusher->publishing = false;
-    pusher->last_disconnect_time = time_util::now_ms();
     
-    schedule_pusher_reconnect(pusher);
+    // Create new client within same Pusher struct
+    pusher->client.reset();  // Destroy old client (removes from epoll)
+    pusher->client = std::make_unique<rtmp::Client>(loop_);
+    
+    // Re-setup callbacks with same pusher pointer
+    pusher->client->set_connected_callback([this, pusher]() {
+        Logger::info("Pusher connected_callback fired for ", pusher->stream_id.to_string());
+        handle_pusher_connected(pusher);
+    });
+    
+    pusher->client->set_message_callback([this, pusher](const rtmp::Message& msg) {
+        handle_pusher_message(pusher, msg);
+    });
+    
+    pusher->client->set_disconnected_callback([this, pusher]() {
+        handle_pusher_disconnected(pusher);
+    });
+    
+    // Update reconnect delay with exponential backoff
+    pusher->reconnect_delay_ms = std::min(delay_ms * 2, 5000u);
+    
+    // Reconnect
+    std::string url = build_push_url(stream_id);
+    size_t proto_end = url.find("://");
+    if (proto_end == std::string::npos) {
+        Logger::error("Invalid push URL: ", url);
+        return;
+    }
+    
+    size_t host_start = proto_end + 3;
+    size_t path_start = url.find('/', host_start);
+    
+    std::string host_port = url.substr(host_start, path_start - host_start);
+    auto addr_result = Socket::parse_address(host_port);
+    
+    if (addr_result.is_err()) {
+        Logger::error("Failed to parse push URL: ", addr_result.error());
+        return;
+    }
+    
+    auto [host, port] = addr_result.value();
+    
+    Logger::info("Reconnecting pusher to ", host, ":", port, " in ", delay_ms, "ms");
+    
+    // For now, reconnect immediately (no timer support in the event loop)
+    // In a real implementation, would use a timer to delay reconnection
+    auto connect_result = pusher->client->connect(host, port);
+    if (connect_result.is_err()) {
+        Logger::error("Pusher reconnect failed: ", connect_result.error());
+    } else {
+        Logger::debug("Pusher reconnect initiated");
+    }
 }
 
 void RelayManager::relay_message(Pusher* pusher, const rtmp::Message& msg) {
@@ -521,6 +566,7 @@ void RelayManager::relay_message(Pusher* pusher, const rtmp::Message& msg) {
 
 void RelayManager::schedule_pusher_reconnect(Pusher* pusher) {
     pusher->reconnect_delay_ms = std::min(pusher->reconnect_delay_ms * 2, 5000u);
+    Logger::debug("Updated reconnect delay to ", pusher->reconnect_delay_ms, "ms");
 }
 
 std::string RelayManager::build_push_url(const StreamId& stream_id) {

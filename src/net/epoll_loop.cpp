@@ -68,12 +68,9 @@ Result<void> EpollLoop::run_once(int timeout_ms) {
         return Result<void>::Err("epoll_wait failed: " + std::string(strerror(errno)));
     }
     
-    Logger::debug("epoll_wait returned ", nfds, " events");
-    
     for (int i = 0; i < nfds; ++i) {
         int fd = events[i].data.fd;
         uint32_t ev = events[i].events;
-        Logger::debug("Processing fd=", fd, " events=", ev);
         
         auto it = callbacks_.find(fd);
         if (it != callbacks_.end()) {
