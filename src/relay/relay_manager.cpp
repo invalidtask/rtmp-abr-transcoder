@@ -1,4 +1,5 @@
 #include "relay/relay_manager.hpp"
+#include "transcode/transcoder.hpp"
 #include "core/log.hpp"
 #include "core/time.hpp"
 #include <sys/epoll.h>
@@ -16,6 +17,10 @@ void RelayManager::set_push_url(const std::string& url) {
 
 void RelayManager::set_push_template(const std::string& tmpl) {
     push_template_ = tmpl;
+}
+
+void RelayManager::set_transcoder(std::shared_ptr<transcode::Transcoder> transcoder) {
+    transcoder_ = transcoder;
 }
 
 Result<void> RelayManager::start_server(const std::string& addr, uint16_t port) {
@@ -193,9 +198,23 @@ void RelayManager::handle_publisher_message(Publisher* pub, const rtmp::Message&
             pub->last_stats_log = now;
         }
         
-        auto it = pushers_.find(pub->stream_id);
-        if (it != pushers_.end()) {
-            relay_message(it->second.get(), msg);
+        // If transcoder is set, send to transcoder instead of relay
+        if (transcoder_) {
+            if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::Video)) {
+                bool keyframe = !msg.payload.empty() && (msg.payload[0] & 0xF0) == 0x10;
+                transcoder_->on_video_data(msg.payload.data(), msg.payload.size(), 
+                                          msg.timestamp, keyframe);
+            }
+            else if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::Audio)) {
+                transcoder_->on_audio_data(msg.payload.data(), msg.payload.size(), 
+                                          msg.timestamp);
+            }
+        } else {
+            // Original relay behavior
+            auto it = pushers_.find(pub->stream_id);
+            if (it != pushers_.end()) {
+                relay_message(it->second.get(), msg);
+            }
         }
     }
 }
@@ -273,7 +292,15 @@ void RelayManager::handle_publisher_command(Publisher* pub, const rtmp::CommandM
             Logger::debug("Sending onStatus for publish");
             flush_publisher_responses(pub);
             
-            create_pusher(pub->stream_id);
+            // If transcoder is active, start it
+            if (transcoder_) {
+                Logger::info("Starting transcoder for stream: ", pub->stream_id.to_string());
+                transcoder_->start();
+                // Set default metadata (will be updated from actual stream)
+                transcoder_->on_source_metadata(1920, 1080, 30, 44100, 2);
+            } else {
+                create_pusher(pub->stream_id);
+            }
         }
     }
 }

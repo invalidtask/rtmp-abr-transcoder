@@ -2,6 +2,7 @@
 #include "core/log.hpp"
 #include "net/epoll_loop.hpp"
 #include "relay/relay_manager.hpp"
+#include "transcode/transcoder.hpp"
 #include <csignal>
 #include <iostream>
 
@@ -39,6 +40,15 @@ int main(int argc, char** argv) {
         }
         Logger::info("Push URL: ", config.push_url);
         Logger::info("Push template: ", config.push_template);
+    } else if (config.mode == "transcode") {
+        if (config.outputs.empty()) {
+            Logger::error("Transcode mode requires at least one --output");
+            return 1;
+        }
+        for (const auto& out : config.outputs) {
+            Logger::info("Output: ", out.name, " (", out.width, "x", out.height, 
+                         " @ ", out.video_bitrate_kbps, " kbps) -> ", out.url);
+        }
     }
     
     EpollLoop loop;
@@ -53,7 +63,28 @@ int main(int argc, char** argv) {
     
     relay::RelayManager manager(loop, policy);
     
-    if (config.mode == "relay") {
+    // Setup transcoder if in transcode mode
+    std::shared_ptr<transcode::Transcoder> transcoder;
+    if (config.mode == "transcode") {
+        transcoder = std::make_shared<transcode::Transcoder>(loop);
+        
+        for (const auto& out : config.outputs) {
+            transcode::OutputConfig out_config;
+            out_config.name = out.name;
+            out_config.width = out.width;
+            out_config.height = out.height;
+            out_config.video_bitrate_kbps = out.video_bitrate_kbps;
+            out_config.audio_bitrate_kbps = out.audio_bitrate_kbps;
+            out_config.rtmp_url = out.url;
+            
+            if (!transcoder->add_output(out_config)) {
+                Logger::error("Failed to add output: ", out.name);
+                return 1;
+            }
+        }
+        
+        manager.set_transcoder(transcoder);
+    } else if (config.mode == "relay") {
         manager.set_push_url(config.push_url);
         manager.set_push_template(config.push_template);
     }
