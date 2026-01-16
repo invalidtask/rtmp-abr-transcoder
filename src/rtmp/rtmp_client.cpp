@@ -257,8 +257,11 @@ void Client::cleanup() {
 
 void Client::process_buffered_data() {
     if (read_buffer_.empty()) {
+        Logger::debug("process_buffered_data: buffer empty");
         return;
     }
+    
+    Logger::debug("process_buffered_data: processing ", read_buffer_.size(), " bytes");
     
     auto process_result = session_->process_input(
         std::span<const uint8_t>(read_buffer_.data(), read_buffer_.size())
@@ -266,8 +269,16 @@ void Client::process_buffered_data() {
     
     if (process_result.is_ok()) {
         size_t consumed = process_result.value();
+        Logger::debug("process_buffered_data: consumed ", consumed, " bytes");
         if (consumed > 0) {
-            read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + consumed);
+            if (consumed <= read_buffer_.size()) {
+                read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + consumed);
+                Logger::debug("process_buffered_data: buffer now has ", read_buffer_.size(), " bytes");
+            } else {
+                Logger::error("Consumed more bytes than buffer contains! consumed=", consumed, 
+                            ", buffer_size=", read_buffer_.size());
+                read_buffer_.clear();
+            }
         }
     } else {
         Logger::error("Process input error: ", process_result.error());
