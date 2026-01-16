@@ -109,6 +109,9 @@ void Client::flush() {
             auto result = socket_.write(data.data(), data.size());
             if (result.is_ok()) {
                 Logger::debug("Wrote ", result.value(), " bytes");
+                if (result.value() < data.size()) {
+                    Logger::warn("Partial flush occurred, ", result.value(), " of ", data.size(), " bytes written");
+                }
             } else {
                 Logger::error("Flush failed: ", result.error());
             }
