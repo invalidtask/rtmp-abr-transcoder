@@ -48,7 +48,12 @@ Result<void> Client::connect(const std::string& host, uint16_t port) {
     Buffer temp_buf;
     temp_buf.append(handshake_data);
     
-    return loop_.add(socket_.fd(), EPOLLOUT | EPOLLIN, [this, handshake_data](uint32_t events) mutable {
+    Logger::debug("Adding pusher socket fd=", socket_.fd(), " to epoll");
+    
+    auto add_result = loop_.add(socket_.fd(), EPOLLOUT | EPOLLIN, [this, handshake_data](uint32_t events) mutable {
+        Logger::debug("Pusher epoll callback fired, events=", events, 
+                      " EPOLLIN=", (events & EPOLLIN) ? "yes" : "no",
+                      " EPOLLOUT=", (events & EPOLLOUT) ? "yes" : "no");
         if (events & EPOLLOUT) {
             if (connecting_) {
                 Logger::debug("EPOLLOUT received, sending handshake");
@@ -75,6 +80,14 @@ Result<void> Client::connect(const std::string& host, uint16_t port) {
             cleanup();
         }
     });
+    
+    if (add_result.is_err()) {
+        Logger::error("Failed to add pusher socket to epoll: ", add_result.error());
+        return add_result;
+    }
+    
+    Logger::debug("Pusher socket added to epoll successfully");
+    return Result<void>::Ok();
 }
 
 void Client::disconnect() {
