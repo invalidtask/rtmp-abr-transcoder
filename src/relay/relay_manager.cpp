@@ -411,44 +411,60 @@ void RelayManager::handle_pusher_connected(Pusher* pusher) {
     
     pusher->client->send_command(connect_cmd);
     Logger::debug("Connect command sent, txn_id: 1");
+    
+    // Force flush
+    pusher->client->flush();
 }
 
 void RelayManager::handle_pusher_message(Pusher* pusher, const rtmp::Message& msg) {
+    Logger::debug("Pusher received message type: ", static_cast<int>(msg.type_id), 
+                  ", size: ", msg.payload.size());
+    
     if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::CommandAMF0)) {
         auto cmd = rtmp::CommandMessage::parse(msg.payload);
-        if (cmd && cmd->name == "_result" && !pusher->publishing) {
-            Logger::debug("Received _result for txn_id: ", cmd->transaction_id);
-            if (cmd->transaction_id == 1) {
-                Logger::debug("Sending createStream command");
-                rtmp::CommandMessage create_stream;
-                create_stream.name = "createStream";
-                create_stream.transaction_id = 2;
-                create_stream.arguments.push_back(amf0::Value::Null());
-                
-                pusher->client->send_command(create_stream);
-            }
-            else if (cmd->transaction_id == 2) {
-                Logger::debug("Sending publish command for stream: ", pusher->stream_id.stream);
-                rtmp::CommandMessage publish_cmd;
-                publish_cmd.name = "publish";
-                publish_cmd.transaction_id = 0;
-                publish_cmd.arguments.push_back(amf0::Value::Null());
-                publish_cmd.arguments.push_back(amf0::Value::String(pusher->stream_id.stream));
-                publish_cmd.arguments.push_back(amf0::Value::String("live"));
-                
-                pusher->client->send_command(publish_cmd);
-                pusher->publishing = true;
-                
-                Logger::info("Pusher publishing to ", pusher->stream_id.to_string());
-                
-                if (!pusher->buffer.empty()) {
-                    Logger::debug("Flushing ", pusher->buffer.size(), " buffered messages");
+        if (cmd) {
+            Logger::debug("Pusher received command: ", cmd->name, ", txn_id: ", cmd->transaction_id);
+            
+            if (cmd->name == "_result" && !pusher->publishing) {
+                Logger::debug("Received _result for txn_id: ", cmd->transaction_id);
+                if (cmd->transaction_id == 1) {
+                    Logger::debug("Sending createStream command");
+                    rtmp::CommandMessage create_stream;
+                    create_stream.name = "createStream";
+                    create_stream.transaction_id = 2;
+                    create_stream.arguments.push_back(amf0::Value::Null());
+                    
+                    pusher->client->send_command(create_stream);
+                    pusher->client->flush();
                 }
-                for (const auto& buffered_msg : pusher->buffer) {
-                    pusher->client->send_message(buffered_msg);
+                else if (cmd->transaction_id == 2) {
+                    Logger::debug("Sending publish command for stream: ", pusher->stream_id.stream);
+                    rtmp::CommandMessage publish_cmd;
+                    publish_cmd.name = "publish";
+                    publish_cmd.transaction_id = 0;
+                    publish_cmd.arguments.push_back(amf0::Value::Null());
+                    publish_cmd.arguments.push_back(amf0::Value::String(pusher->stream_id.stream));
+                    publish_cmd.arguments.push_back(amf0::Value::String("live"));
+                    
+                    pusher->client->send_command(publish_cmd);
+                    pusher->client->flush();
+                    pusher->publishing = true;
+                    
+                    Logger::info("Pusher publishing to ", pusher->stream_id.to_string());
+                    
+                    if (!pusher->buffer.empty()) {
+                        Logger::debug("Flushing ", pusher->buffer.size(), " buffered messages");
+                    }
+                    for (const auto& buffered_msg : pusher->buffer) {
+                        pusher->client->send_message(buffered_msg);
+                    }
+                    pusher->buffer.clear();
+                    pusher->pending_bytes = 0;
                 }
-                pusher->buffer.clear();
-                pusher->pending_bytes = 0;
+            } else if (cmd->name == "_error") {
+                Logger::error("Pusher received error from server");
+            } else if (cmd->name == "onStatus") {
+                Logger::debug("Pusher received onStatus");
             }
         }
     }

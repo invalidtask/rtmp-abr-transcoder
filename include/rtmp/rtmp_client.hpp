@@ -23,6 +23,7 @@ public:
     
     void send_message(const Message& msg);
     void send_command(const CommandMessage& cmd, uint32_t chunk_stream_id = 3);
+    void flush();
     
     void set_connected_callback(ConnectedCallback cb) { connected_callback_ = std::move(cb); }
     void set_message_callback(MessageCallback cb) { message_callback_ = std::move(cb); }

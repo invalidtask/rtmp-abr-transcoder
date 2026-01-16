@@ -101,8 +101,25 @@ void Client::send_command(const CommandMessage& cmd, uint32_t chunk_stream_id) {
     }
 }
 
+void Client::flush() {
+    if (session_ && session_->has_outgoing_data()) {
+        auto data = session_->get_outgoing_data();
+        if (!data.empty()) {
+            Logger::debug("Flushing ", data.size(), " bytes to pusher socket");
+            auto result = socket_.write(data.data(), data.size());
+            if (result.is_ok()) {
+                Logger::debug("Wrote ", result.value(), " bytes");
+            } else {
+                Logger::error("Flush failed: ", result.error());
+            }
+        }
+    }
+}
+
 void Client::handle_writable() {
+    Logger::debug("Client::handle_writable called");
     if (!session_ || !session_->has_outgoing_data()) {
+        Logger::debug("No outgoing data, switching to EPOLLIN only");
         loop_.modify(socket_.fd(), EPOLLIN);
         return;
     }
@@ -113,6 +130,7 @@ void Client::handle_writable() {
         return;
     }
     
+    Logger::debug("Writing ", data.size(), " bytes to socket");
     auto write_result = socket_.write(data.data(), data.size());
     if (write_result.is_err()) {
         Logger::error("Write error: ", write_result.error());
