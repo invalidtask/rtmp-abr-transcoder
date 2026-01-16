@@ -1,4 +1,5 @@
 #include "net/epoll_loop.hpp"
+#include "core/log.hpp"
 #include <sys/epoll.h>
 #include <unistd.h>
 #include <cstring>
@@ -18,15 +19,20 @@ EpollLoop::~EpollLoop() {
 }
 
 Result<void> EpollLoop::add(int fd, uint32_t events, EpollCallback callback) {
+    Logger::debug("EpollLoop::add fd=", fd, " events=", events);
+    
     epoll_event ev{};
     ev.events = events;
     ev.data.fd = fd;
     
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) == -1) {
+        Logger::error("epoll_ctl ADD failed for fd=", fd, ": ", strerror(errno));
         return Result<void>::Err("epoll_ctl ADD failed: " + std::string(strerror(errno)));
     }
     
     callbacks_[fd] = std::move(callback);
+    Logger::debug("Callback stored for fd=", fd, ", total callbacks=", callbacks_.size());
+    
     return Result<void>::Ok();
 }
 
@@ -62,11 +68,18 @@ Result<void> EpollLoop::run_once(int timeout_ms) {
         return Result<void>::Err("epoll_wait failed: " + std::string(strerror(errno)));
     }
     
+    Logger::debug("epoll_wait returned ", nfds, " events");
+    
     for (int i = 0; i < nfds; ++i) {
         int fd = events[i].data.fd;
+        uint32_t ev = events[i].events;
+        Logger::debug("Processing fd=", fd, " events=", ev);
+        
         auto it = callbacks_.find(fd);
         if (it != callbacks_.end()) {
-            it->second(events[i].events);
+            it->second(ev);
+        } else {
+            Logger::warn("No callback for fd=", fd);
         }
     }
     
