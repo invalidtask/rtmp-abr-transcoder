@@ -57,9 +57,10 @@ bool AACDecoder::decode(const uint8_t* aac_data, size_t size, uint32_t timestamp
     
     // Fill decoder buffer
     UINT bytes_valid = size;
+    UINT buffer_size = size;
     UCHAR* input_buffer = const_cast<UCHAR*>(aac_data);
     
-    AAC_DECODER_ERROR err = aacDecoder_Fill(impl_->decoder, &input_buffer, &size, &bytes_valid);
+    AAC_DECODER_ERROR err = aacDecoder_Fill(impl_->decoder, &input_buffer, &buffer_size, &bytes_valid);
     if (err != AAC_DEC_OK) {
         Logger::debug("AAC decoder fill failed: ", err);
         return false;
