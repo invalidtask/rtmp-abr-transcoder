@@ -28,6 +28,9 @@ public:
     bool is_done() const { return state_ == State::Done; }
     State state() const { return state_; }
     
+    const std::vector<uint8_t>& s1_data() const { return s1_data_; }
+    const std::vector<uint8_t>& c1_data() const { return c1_data_; }
+    
 private:
     State state_;
     std::vector<uint8_t> c1_data_;

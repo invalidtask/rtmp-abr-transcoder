@@ -3,6 +3,7 @@ set(TEST_SOURCES
     unit_amf0.cpp
     unit_chunks.cpp
     unit_socket.cpp
+    unit_handshake.cpp
     integration_relay.cpp
 )
 
