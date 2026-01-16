@@ -95,21 +95,31 @@ Result<size_t> Handshake::process_client_handshake(std::span<const uint8_t> data
 
 Result<size_t> Handshake::process_server_handshake(std::span<const uint8_t> data) {
     if (state_ == State::C0C1Sent) {
-        if (data.size() < 1 + 1536 + 1536) {
-            return Result<size_t>::Err("Not enough data for S0+S1+S2");
+        // Per RTMP spec: S0 (1 byte) + S1 (1536 bytes) + S2 (1536 bytes) = 3073 bytes
+        constexpr size_t S0_S1_S2_SIZE = 1 + 1536 + 1536;
+        
+        if (data.size() < S0_S1_S2_SIZE) {
+            // Not an error - just need more data (TCP fragmentation)
+            return Result<size_t>::Err("NEED_MORE_DATA");
         }
         
+        // Per RTMP spec: S0 must contain version 3 for plain RTMP
         if (data[0] != 3) {
-            return Result<size_t>::Err("Invalid RTMP version");
+            return Result<size_t>::Err("Invalid RTMP version in S0");
         }
         
-        s1_data_.assign(data.begin() + 1, data.begin() + 1537);
+        // S1 is bytes 1-1536 (1536 bytes)
+        s1_data_.assign(data.begin() + 1, data.begin() + 1 + 1536);
+        
+        // S2 is bytes 1537-3072 (1536 bytes) - should be echo of C1
+        // Per spec, we should verify S2 matches C1, but many implementations skip this
+        
         state_ = State::Done;
         
-        return Result<size_t>(1 + 1536 + 1536);
+        return Result<size_t>(S0_S1_S2_SIZE);
     }
     
-    return Result<size_t>::Err("Invalid state");
+    return Result<size_t>::Err("Invalid handshake state");
 }
 
 }

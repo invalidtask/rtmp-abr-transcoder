@@ -33,6 +33,7 @@ public:
 private:
     void handle_writable();
     void handle_readable();
+    void process_buffered_data();
     void cleanup();
     
     EpollLoop& loop_;
@@ -44,6 +45,8 @@ private:
     ConnectedCallback connected_callback_;
     MessageCallback message_callback_;
     DisconnectedCallback disconnected_callback_;
+    
+    std::vector<uint8_t> read_buffer_;
 };
 
 }

@@ -147,41 +147,61 @@ void Client::handle_readable() {
     size_t bytes_read = read_result.value();
     Logger::debug("Read ", bytes_read, " bytes from socket");
     
+    // Append new data to read buffer
+    read_buffer_.insert(read_buffer_.end(), buffer, buffer + bytes_read);
+    Logger::debug("Read buffer now contains ", read_buffer_.size(), " bytes");
+    
     if (!session_->handshake_done()) {
-        Logger::debug("Processing server handshake, ", bytes_read, " bytes");
+        // Per RTMP spec: S0+S1+S2 = 1 + 1536 + 1536 = 3073 bytes
+        // Must wait until we have all 3073 bytes
+        Logger::debug("Processing server handshake, buffer has ", read_buffer_.size(), " bytes");
+        
         auto handshake_result = session_->handshake().process_server_handshake(
-            std::span<const uint8_t>(buffer, bytes_read)
+            std::span<const uint8_t>(read_buffer_.data(), read_buffer_.size())
         );
         
         if (handshake_result.is_ok()) {
-            Logger::debug("Client handshake complete!");
+            size_t consumed = handshake_result.value();
+            Logger::debug("Client handshake complete! Consumed ", consumed, " bytes");
+            
+            // Remove consumed handshake bytes from buffer
+            read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + consumed);
+            
             connected_ = true;
+            
+            // Per RTMP spec: After handshake, client must send C2 (echo of S1)
+            // generate_c2() creates 1536 bytes echoing S1
+            auto c2_data = session_->handshake().generate_c2(
+                std::span<const uint8_t>(session_->handshake().s1_data())
+            );
+            
+            Logger::debug("Sending C2, ", c2_data.size(), " bytes");
+            auto write_result = socket_.write(c2_data.data(), c2_data.size());
+            if (write_result.is_err()) {
+                Logger::error("Failed to send C2: ", write_result.error());
+                cleanup();
+                return;
+            }
+            Logger::debug("C2 sent successfully");
+            
             if (connected_callback_) {
                 Logger::debug("Calling connected_callback");
                 connected_callback_();
             }
             
-            size_t consumed = handshake_result.value();
-            if (consumed < bytes_read) {
-                Logger::debug("Processing ", bytes_read - consumed, " bytes after handshake");
-                auto process_result = session_->process_input(
-                    std::span<const uint8_t>(buffer + consumed, bytes_read - consumed)
-                );
-                if (process_result.is_err()) {
-                    Logger::error("Process input error: ", process_result.error());
-                }
+            // Process any remaining data after handshake as RTMP messages
+            if (!read_buffer_.empty()) {
+                Logger::debug("Processing ", read_buffer_.size(), " bytes after handshake");
+                process_buffered_data();
             }
         } else {
-            Logger::debug("Handshake not yet complete, waiting for more data");
+            Logger::debug("Handshake not yet complete, need more data. Have ", 
+                         read_buffer_.size(), " bytes, need 3073");
+            // Data stays in read_buffer_ for next read
         }
     } else {
-        auto process_result = session_->process_input(
-            std::span<const uint8_t>(buffer, bytes_read)
-        );
-        
-        if (process_result.is_err()) {
-            Logger::error("Process input error: ", process_result.error());
-        }
+        // Handshake complete - process as RTMP chunks
+        process_buffered_data();
     }
 }
 
@@ -196,6 +216,25 @@ void Client::cleanup() {
     
     if (disconnected_callback_) {
         disconnected_callback_();
+    }
+}
+
+void Client::process_buffered_data() {
+    if (read_buffer_.empty()) {
+        return;
+    }
+    
+    auto process_result = session_->process_input(
+        std::span<const uint8_t>(read_buffer_.data(), read_buffer_.size())
+    );
+    
+    if (process_result.is_ok()) {
+        size_t consumed = process_result.value();
+        if (consumed > 0) {
+            read_buffer_.erase(read_buffer_.begin(), read_buffer_.begin() + consumed);
+        }
+    } else {
+        Logger::error("Process input error: ", process_result.error());
     }
 }
 
