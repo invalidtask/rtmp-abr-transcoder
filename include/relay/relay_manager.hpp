@@ -65,7 +65,6 @@ private:
     void handle_pusher_message(Pusher* pusher, const rtmp::Message& msg);
     void handle_pusher_disconnected(Pusher* pusher);
     void relay_message(Pusher* pusher, const rtmp::Message& msg);
-    void schedule_pusher_reconnect(Pusher* pusher);
     
     std::string build_push_url(const StreamId& stream_id);
     
