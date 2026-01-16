@@ -365,8 +365,9 @@ void RelayManager::create_pusher(const StreamId& stream_id) {
     
     auto connect_result = pusher->client->connect(host, port);
     if (connect_result.is_err()) {
-        Logger::error("Pusher connect() returned error: ", connect_result.error());
-        schedule_pusher_reconnect(pusher_ptr);
+        Logger::error("Pusher initial connect() failed: ", connect_result.error());
+        // Initial connection failure - pusher will remain disconnected
+        // Reconnection will be handled via disconnected_callback if connection drops later
     } else {
         Logger::debug("Pusher connect() initiated successfully");
     }
@@ -512,10 +513,10 @@ void RelayManager::handle_pusher_disconnected(Pusher* pusher) {
     
     auto [host, port] = addr_result.value();
     
-    Logger::info("Reconnecting pusher to ", host, ":", port, " in ", delay_ms, "ms");
+    Logger::info("Reconnecting pusher to ", host, ":", port);
     
-    // For now, reconnect immediately (no timer support in the event loop)
-    // In a real implementation, would use a timer to delay reconnection
+    // Note: Immediate reconnection (no delay) as event loop doesn't have timer support
+    // The exponential backoff delay is calculated but not enforced here
     auto connect_result = pusher->client->connect(host, port);
     if (connect_result.is_err()) {
         Logger::error("Pusher reconnect failed: ", connect_result.error());
@@ -562,11 +563,6 @@ void RelayManager::relay_message(Pusher* pusher, const rtmp::Message& msg) {
         pusher->buffer.push_back(msg);
         Logger::debug("Buffering message (not yet publishing), pending: ", pusher->pending_bytes, " bytes, buffer size: ", pusher->buffer.size());
     }
-}
-
-void RelayManager::schedule_pusher_reconnect(Pusher* pusher) {
-    pusher->reconnect_delay_ms = std::min(pusher->reconnect_delay_ms * 2, 5000u);
-    Logger::debug("Updated reconnect delay to ", pusher->reconnect_delay_ms, "ms");
 }
 
 std::string RelayManager::build_push_url(const StreamId& stream_id) {
