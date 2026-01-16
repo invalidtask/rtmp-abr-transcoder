@@ -188,8 +188,6 @@ ffmpeg -re -f lavfi -i testsrc=size=640x480:rate=30 \
 
 #### Relay Mode
 
-#### Relay Mode
-
 1. Start the relay:
 ```bash
 ./build/rtmp_abr_transcoder --listen 0.0.0.0:1935 --mode relay --push-url rtmp://your-cdn.com/live

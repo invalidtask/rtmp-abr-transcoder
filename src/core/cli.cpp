@@ -1,10 +1,6 @@
 #include "core/cli.hpp"
 #include <iostream>
 #include <cstring>
-
-#include "core/cli.hpp"
-#include <iostream>
-#include <cstring>
 #include <sstream>
 
 static bool parse_output_spec(const std::string& spec, OutputSpec& out) {

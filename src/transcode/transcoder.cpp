@@ -151,9 +151,7 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
     
     for (auto& output : outputs_) {
         // Initialize encoders on first frame
-        if (!output->video_encoder->get_sps().empty()) {
-            // Already initialized
-        } else {
+        if (!output->video_initialized) {
             EncoderConfig enc_config;
             enc_config.width = output->config.width;
             enc_config.height = output->config.height;
@@ -253,6 +251,8 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
                     Logger::error("Failed to parse URL for ", output->config.name);
                 }
             }
+            
+            output->video_initialized = true;
         }
         
         // Scale and encode
@@ -273,12 +273,13 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
     
     for (auto& output : outputs_) {
         // Initialize audio encoder on first frame
-        if (output->audio_encoder->get_audio_specific_config().empty()) {
+        if (!output->audio_initialized) {
             if (!output->audio_encoder->initialize(frame.sample_rate, frame.channels, 
                                                    output->config.audio_bitrate_kbps)) {
                 Logger::error("Failed to initialize audio encoder for ", output->config.name);
                 continue;
             }
+            output->audio_initialized = true;
         }
         
         // Encode

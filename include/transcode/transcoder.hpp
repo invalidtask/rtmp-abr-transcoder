@@ -44,6 +44,8 @@ private:
         std::unique_ptr<rtmp::Client> pusher;
         bool connected = false;
         bool publishing = false;
+        bool video_initialized = false;
+        bool audio_initialized = false;
     };
     
     void process_video_frame(const VideoFrame& frame);
