@@ -132,6 +132,11 @@ bool H264Encoder::encode(const VideoFrame& frame, std::vector<EncodedPacket>& ou
                 
                 // Skip the start code
                 int startcode_len = get_startcode_length(nal_ptr, nal_size_with_startcode);
+                if (startcode_len == 0) {
+                    Logger::error("Expected Annex-B start code in NAL unit from encoder");
+                    nal_ptr += nal_size_with_startcode;
+                    continue;
+                }
                 
                 int nal_size = nal_size_with_startcode - startcode_len;
                 uint8_t* nal_data = nal_ptr + startcode_len;
@@ -167,6 +172,11 @@ bool H264Encoder::encode(const VideoFrame& frame, std::vector<EncodedPacket>& ou
             
             // Skip the start code
             int startcode_len = get_startcode_length(nal_ptr, nal_size_with_startcode);
+            if (startcode_len == 0) {
+                Logger::error("Expected Annex-B start code in NAL unit from encoder");
+                nal_ptr += nal_size_with_startcode;
+                continue;
+            }
             
             int nal_size = nal_size_with_startcode - startcode_len;
             uint8_t* nal_data = nal_ptr + startcode_len;

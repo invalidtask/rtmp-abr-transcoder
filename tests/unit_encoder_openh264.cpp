@@ -124,8 +124,10 @@ TEST_CASE(encoder_does_not_output_annexb) {
             // Start codes should be followed by a valid NAL header
             if (i + 3 < packet.data.size()) {
                 uint8_t potential_nal_header = packet.data[i+3];
-                // If forbidden bit is 0 and nal_type is valid (1-31), this looks like a start code
-                if ((potential_nal_header & 0x80) == 0 && (potential_nal_header & 0x1F) != 0) {
+                // Valid NAL header has forbidden_zero_bit = 0 (bit 7)
+                // NAL type should be in range 1-31 for valid NAL units (type 0 is reserved)
+                uint8_t nal_type = potential_nal_header & 0x1F;
+                if ((potential_nal_header & 0x80) == 0 && nal_type >= 1 && nal_type <= 31) {
                     REQUIRE(false); // Fail - found Annex-B start code
                 }
             }
