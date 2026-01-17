@@ -5,6 +5,10 @@
 
 namespace transcode {
 
+// H.264 NAL unit types
+constexpr uint8_t NAL_TYPE_SPS = 7;
+constexpr uint8_t NAL_TYPE_PPS = 8;
+
 // Helper function to detect and skip Annex-B start code
 // Returns the start code length (3 or 4 bytes)
 static int get_startcode_length(const uint8_t* data, int size) {
@@ -144,9 +148,9 @@ bool H264Encoder::encode(const VideoFrame& frame, std::vector<EncodedPacket>& ou
                 // Check NAL type (first byte of NAL unit)
                 if (nal_size > 0) {
                     uint8_t nal_type = nal_data[0] & 0x1F;
-                    if (nal_type == 7) {  // SPS
+                    if (nal_type == NAL_TYPE_SPS) {
                         impl_->sps.assign(nal_data, nal_data + nal_size);
-                    } else if (nal_type == 8) {  // PPS
+                    } else if (nal_type == NAL_TYPE_PPS) {
                         impl_->pps.assign(nal_data, nal_data + nal_size);
                     }
                 }

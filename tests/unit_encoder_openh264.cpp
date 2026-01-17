@@ -3,6 +3,11 @@
 #include "transcode/decoder.hpp"
 #include <vector>
 
+// H.264 NAL unit constants
+constexpr uint8_t NAL_FORBIDDEN_ZERO_BIT_MASK = 0x80;
+constexpr uint8_t NAL_TYPE_MASK = 0x1F;
+constexpr uint8_t MAX_VALID_NAL_TYPE = 31;
+
 // Test that encoder outputs AVCC format (4-byte length prefix, not Annex-B start codes)
 TEST_CASE(encoder_outputs_avcc_format) {
     transcode::H264Encoder encoder;
@@ -62,7 +67,7 @@ TEST_CASE(encoder_outputs_avcc_format) {
         if (nal_size >= 1) {
             uint8_t nal_header = packet.data[offset];
             // NAL unit header should have forbidden_zero_bit = 0 (bit 7)
-            REQUIRE((nal_header & 0x80) == 0);
+            REQUIRE((nal_header & NAL_FORBIDDEN_ZERO_BIT_MASK) == 0);
             found_valid_nalu = true;
         }
         
@@ -126,8 +131,9 @@ TEST_CASE(encoder_does_not_output_annexb) {
                 uint8_t potential_nal_header = packet.data[i+3];
                 // Valid NAL header has forbidden_zero_bit = 0 (bit 7)
                 // NAL type should be in range 1-31 for valid NAL units (type 0 is reserved)
-                uint8_t nal_type = potential_nal_header & 0x1F;
-                if ((potential_nal_header & 0x80) == 0 && nal_type >= 1 && nal_type <= 31) {
+                uint8_t nal_type = potential_nal_header & NAL_TYPE_MASK;
+                if ((potential_nal_header & NAL_FORBIDDEN_ZERO_BIT_MASK) == 0 && 
+                    nal_type >= 1 && nal_type <= MAX_VALID_NAL_TYPE) {
                     REQUIRE(false); // Fail - found Annex-B start code
                 }
             }
