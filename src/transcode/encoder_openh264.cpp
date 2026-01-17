@@ -114,22 +114,32 @@ bool H264Encoder::encode(const VideoFrame& frame, std::vector<EncodedPacket>& ou
     if (info.eFrameType == videoFrameTypeIDR && impl_->sps.empty()) {
         for (int layer = 0; layer < info.iLayerNum; layer++) {
             SLayerBSInfo* layer_info = &info.sLayerInfo[layer];
+            uint8_t* nal_ptr = layer_info->pBsBuf;
+            
             for (int nal = 0; nal < layer_info->iNalCount; nal++) {
-                int nal_size = layer_info->pNalLengthInByte[nal];
-                uint8_t* nal_data = layer_info->pBsBuf;
-                for (int i = 0; i < nal; i++) {
-                    nal_data += layer_info->pNalLengthInByte[i];
+                int nal_size_with_startcode = layer_info->pNalLengthInByte[nal];
+                
+                // Skip the start code (3 or 4 bytes: 00 00 01 or 00 00 00 01)
+                int startcode_len = 4;
+                if (nal_size_with_startcode >= 3 && 
+                    nal_ptr[0] == 0 && nal_ptr[1] == 0 && nal_ptr[2] == 1) {
+                    startcode_len = 3;
                 }
                 
-                // Check NAL type (first byte after start code)
-                if (nal_size > 4) {
-                    uint8_t nal_type = nal_data[4] & 0x1F;
+                int nal_size = nal_size_with_startcode - startcode_len;
+                uint8_t* nal_data = nal_ptr + startcode_len;
+                
+                // Check NAL type (first byte of NAL unit)
+                if (nal_size > 0) {
+                    uint8_t nal_type = nal_data[0] & 0x1F;
                     if (nal_type == 7) {  // SPS
-                        impl_->sps.assign(nal_data + 4, nal_data + nal_size);
+                        impl_->sps.assign(nal_data, nal_data + nal_size);
                     } else if (nal_type == 8) {  // PPS
-                        impl_->pps.assign(nal_data + 4, nal_data + nal_size);
+                        impl_->pps.assign(nal_data, nal_data + nal_size);
                     }
                 }
+                
+                nal_ptr += nal_size_with_startcode;
             }
         }
     }
@@ -140,16 +150,35 @@ bool H264Encoder::encode(const VideoFrame& frame, std::vector<EncodedPacket>& ou
     packet.dts = frame.timestamp;
     packet.keyframe = (info.eFrameType == videoFrameTypeIDR);
     
+    // Convert from Annex-B format (with start codes) to AVCC format (with length prefixes)
     for (int layer = 0; layer < info.iLayerNum; layer++) {
         SLayerBSInfo* layer_info = &info.sLayerInfo[layer];
-        int layer_size = 0;
-        for (int nal = 0; nal < layer_info->iNalCount; nal++) {
-            layer_size += layer_info->pNalLengthInByte[nal];
-        }
+        uint8_t* nal_ptr = layer_info->pBsBuf;
         
-        size_t old_size = packet.data.size();
-        packet.data.resize(old_size + layer_size);
-        memcpy(packet.data.data() + old_size, layer_info->pBsBuf, layer_size);
+        for (int nal = 0; nal < layer_info->iNalCount; nal++) {
+            int nal_size_with_startcode = layer_info->pNalLengthInByte[nal];
+            
+            // Skip the start code (3 or 4 bytes: 00 00 01 or 00 00 00 01)
+            int startcode_len = 4;
+            if (nal_size_with_startcode >= 3 && 
+                nal_ptr[0] == 0 && nal_ptr[1] == 0 && nal_ptr[2] == 1) {
+                startcode_len = 3;
+            }
+            
+            int nal_size = nal_size_with_startcode - startcode_len;
+            uint8_t* nal_data = nal_ptr + startcode_len;
+            
+            // Write 4-byte big-endian length prefix (AVCC format)
+            size_t old_size = packet.data.size();
+            packet.data.resize(old_size + 4 + nal_size);
+            packet.data[old_size] = (nal_size >> 24) & 0xFF;
+            packet.data[old_size + 1] = (nal_size >> 16) & 0xFF;
+            packet.data[old_size + 2] = (nal_size >> 8) & 0xFF;
+            packet.data[old_size + 3] = nal_size & 0xFF;
+            memcpy(packet.data.data() + old_size + 4, nal_data, nal_size);
+            
+            nal_ptr += nal_size_with_startcode;
+        }
     }
     
     out_packets.push_back(std::move(packet));

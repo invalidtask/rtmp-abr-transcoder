@@ -4,6 +4,7 @@ set(TEST_SOURCES
     unit_chunks.cpp
     unit_socket.cpp
     unit_handshake.cpp
+    unit_encoder_openh264.cpp
     integration_relay.cpp
 )
 
