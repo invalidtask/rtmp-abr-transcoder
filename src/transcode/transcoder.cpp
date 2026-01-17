@@ -37,7 +37,10 @@ void Transcoder::on_source_metadata(int width, int height, int fps, int sample_r
     source_sample_rate_ = sample_rate;
     source_channels_ = channels;
     
-    Logger::info("Source stream: ", width, "x", height, " @ ", fps, "fps, H.264/AAC");
+    // Only log if we have actual dimensions (not placeholder 0x0)
+    if (width > 0 && height > 0) {
+        Logger::info("Source stream: ", width, "x", height, " @ ", fps, "fps, H.264/AAC");
+    }
     
     // Initialize decoders
     if (!video_decoder_->initialize()) {
@@ -147,6 +150,13 @@ void Transcoder::on_audio_data(const uint8_t* data, size_t size, uint32_t timest
 }
 
 void Transcoder::process_video_frame(const VideoFrame& frame) {
+    // Update source dimensions from actual decoded frame
+    if (source_width_ != frame.width || source_height_ != frame.height) {
+        source_width_ = frame.width;
+        source_height_ = frame.height;
+        Logger::info("Detected source resolution: ", source_width_, "x", source_height_);
+    }
+    
     Logger::debug("Processing video frame: ", frame.width, "x", frame.height);
     
     for (auto& output : outputs_) {
@@ -172,98 +182,33 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
                 continue;
             }
             
-            // Start RTMP pusher
-            output->pusher = std::make_unique<rtmp::Client>(loop_);
-            
-            // Setup callbacks
-            output->pusher->set_connected_callback([this, out = output.get()]() {
-                Logger::info("Output connected: ", out->config.name);
-                out->connected = true;
-                
-                // Send connect command
-                rtmp::CommandMessage connect_cmd;
-                connect_cmd.name = "connect";
-                connect_cmd.transaction_id = 1;
-                
-                amf0::Value::ObjectType connect_obj;
-                connect_obj["app"] = amf0::Value::String("live");
-                connect_obj["type"] = amf0::Value::String("nonprivate");
-                connect_cmd.arguments.push_back(amf0::Value::Object(connect_obj));
-                
-                out->pusher->send_command(connect_cmd);
-                out->pusher->flush();
-            });
-            
-            output->pusher->set_message_callback([this, out = output.get()](const rtmp::Message& msg) {
-                if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::CommandAMF0)) {
-                    auto cmd = rtmp::CommandMessage::parse(msg.payload);
-                    if (cmd && cmd->name == "_result") {
-                        if (cmd->transaction_id == 1) {
-                            // Connect succeeded, send createStream
-                            rtmp::CommandMessage create_stream;
-                            create_stream.name = "createStream";
-                            create_stream.transaction_id = 2;
-                            create_stream.arguments.push_back(amf0::Value::Null());
-                            
-                            out->pusher->send_command(create_stream);
-                            out->pusher->flush();
-                        } else if (cmd->transaction_id == 2) {
-                            // CreateStream succeeded, send publish
-                            rtmp::CommandMessage publish_cmd;
-                            publish_cmd.name = "publish";
-                            publish_cmd.transaction_id = 0;
-                            publish_cmd.arguments.push_back(amf0::Value::Null());
-                            publish_cmd.arguments.push_back(amf0::Value::String("stream"));
-                            publish_cmd.arguments.push_back(amf0::Value::String("live"));
-                            
-                            out->pusher->send_command(publish_cmd);
-                            out->pusher->flush();
-                            out->publishing = true;
-                            
-                            Logger::info("Output publishing: ", out->config.name);
-                        }
-                    }
-                }
-            });
-            
-            output->pusher->set_disconnected_callback([this, out = output.get()]() {
-                Logger::warn("Output disconnected: ", out->config.name);
-                out->connected = false;
-                out->publishing = false;
-            });
-            
-            // Parse URL and connect
-            std::string url = output->config.rtmp_url;
-            size_t proto_end = url.find("://");
-            if (proto_end != std::string::npos) {
-                size_t host_start = proto_end + 3;
-                size_t path_start = url.find('/', host_start);
-                
-                std::string host_port = url.substr(host_start, path_start - host_start);
-                auto addr_result = Socket::parse_address(host_port);
-                
-                if (addr_result.is_ok()) {
-                    auto [host, port] = addr_result.value();
-                    Logger::info("Transcoding to ", output->config.name, 
-                                 "@", output->config.video_bitrate_kbps, "kbps -> ", url);
-                    output->pusher->connect(host, port);
-                } else {
-                    Logger::error("Failed to parse URL for ", output->config.name);
-                }
-            }
+            Logger::info("Scaler initialized: ", frame.width, "x", frame.height, 
+                        " -> ", output->config.width, "x", output->config.height);
+            Logger::info("H264 encoder initialized: ", output->config.width, "x", output->config.height,
+                        " @ ", output->config.video_bitrate_kbps, "kbps");
             
             output->video_initialized = true;
         }
         
-        // Scale and encode
+        // Scale the frame
         VideoFrame scaled_frame;
-        if (output->scaler->scale(frame, scaled_frame)) {
-            std::vector<EncodedPacket> packets;
-            if (output->video_encoder->encode(scaled_frame, packets)) {
-                for (auto& packet : packets) {
-                    push_video_packet(*output, packet);
-                }
-            }
+        if (!output->scaler->scale(frame, scaled_frame)) {
+            Logger::error("Scaling failed for ", output->config.name);
+            continue;
+        }
+        
+        // Encode the scaled frame
+        std::vector<EncodedPacket> packets;
+        if (!output->video_encoder->encode(scaled_frame, packets)) {
+            Logger::error("Encoding failed for ", output->config.name);
+            continue;
+        }
+        
+        // Push each encoded packet
+        for (auto& packet : packets) {
+            Logger::debug("Encoded ", output->config.name, ": ", packet.data.size(), 
+                         " bytes, keyframe=", packet.keyframe);
+            push_video_packet(*output, packet);
         }
     }
 }
@@ -279,6 +224,7 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
                 Logger::error("Failed to initialize audio encoder for ", output->config.name);
                 continue;
             }
+            Logger::info("AAC encoder initialized for ", output->config.name);
             output->audio_initialized = true;
         }
         
@@ -294,6 +240,13 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
 
 void Transcoder::push_video_packet(Output& output, const EncodedPacket& packet) {
     if (!output.publishing) {
+        // Buffer while waiting for connection
+        output.pending_video.push_back(packet);
+        if (output.pending_video.size() > 300) {  // ~10 seconds at 30fps
+            output.pending_video.erase(output.pending_video.begin());
+        }
+        Logger::debug("Buffering video packet for ", output.config.name, 
+                     " (not yet publishing), buffer size: ", output.pending_video.size());
         return;
     }
     
@@ -326,11 +279,18 @@ void Transcoder::push_video_packet(Output& output, const EncodedPacket& packet) 
     
     output.pusher->send_message(msg);
     
-    Logger::debug("Pushed to ", output.config.name, " output");
+    Logger::debug("Pushed video to ", output.config.name);
 }
 
 void Transcoder::push_audio_packet(Output& output, const EncodedPacket& packet) {
     if (!output.publishing) {
+        // Buffer while waiting for connection
+        output.pending_audio.push_back(packet);
+        if (output.pending_audio.size() > 1500) {  // ~10 seconds at 150 frames/sec
+            output.pending_audio.erase(output.pending_audio.begin());
+        }
+        Logger::debug("Buffering audio packet for ", output.config.name, 
+                     " (not yet publishing), buffer size: ", output.pending_audio.size());
         return;
     }
     
@@ -359,9 +319,38 @@ void Transcoder::push_audio_packet(Output& output, const EncodedPacket& packet) 
     msg.payload = std::move(flv_data);
     
     output.pusher->send_message(msg);
+    
+    Logger::debug("Pushed audio to ", output.config.name);
 }
 
 bool Transcoder::start() {
+    // Create pusher connections immediately, not on first frame
+    for (auto& output : outputs_) {
+        output->pusher = std::make_unique<rtmp::Client>(loop_);
+        setup_pusher_callbacks(output.get());
+        
+        // Parse URL and connect
+        std::string url = output->config.rtmp_url;
+        size_t proto_end = url.find("://");
+        if (proto_end != std::string::npos) {
+            size_t host_start = proto_end + 3;
+            size_t path_start = url.find('/', host_start);
+            
+            std::string host_port = url.substr(host_start, path_start - host_start);
+            auto addr_result = Socket::parse_address(host_port);
+            
+            if (addr_result.is_ok()) {
+                auto [host, port] = addr_result.value();
+                Logger::info("Connecting output ", output->config.name, " to ", url);
+                output->pusher->connect(host, port);
+            } else {
+                Logger::error("Failed to parse URL for ", output->config.name, ": ", addr_result.error());
+            }
+        } else {
+            Logger::error("Invalid URL format for ", output->config.name, ": ", url);
+        }
+    }
+    
     Logger::info("Transcoder started");
     return true;
 }
@@ -369,6 +358,121 @@ bool Transcoder::start() {
 void Transcoder::stop() {
     Logger::info("Transcoder stopped");
     outputs_.clear();
+}
+
+void Transcoder::setup_pusher_callbacks(Output* output) {
+    output->pusher->set_connected_callback([this, out = output]() {
+        Logger::info("Output connected: ", out->config.name);
+        out->connected = true;
+        
+        // Send connect command
+        rtmp::CommandMessage connect_cmd;
+        connect_cmd.name = "connect";
+        connect_cmd.transaction_id = 1;
+        
+        amf0::Value::ObjectType connect_obj;
+        connect_obj["app"] = amf0::Value::String("live");
+        connect_obj["type"] = amf0::Value::String("nonprivate");
+        connect_cmd.arguments.push_back(amf0::Value::Object(connect_obj));
+        
+        out->pusher->send_command(connect_cmd);
+        out->pusher->flush();
+    });
+    
+    output->pusher->set_message_callback([this, out = output](const rtmp::Message& msg) {
+        if (msg.type_id == static_cast<uint8_t>(rtmp::MessageType::CommandAMF0)) {
+            auto cmd = rtmp::CommandMessage::parse(msg.payload);
+            if (cmd && cmd->name == "_result") {
+                if (cmd->transaction_id == 1) {
+                    // Connect succeeded, send createStream
+                    rtmp::CommandMessage create_stream;
+                    create_stream.name = "createStream";
+                    create_stream.transaction_id = 2;
+                    create_stream.arguments.push_back(amf0::Value::Null());
+                    
+                    out->pusher->send_command(create_stream);
+                    out->pusher->flush();
+                } else if (cmd->transaction_id == 2) {
+                    // CreateStream succeeded, send publish
+                    rtmp::CommandMessage publish_cmd;
+                    publish_cmd.name = "publish";
+                    publish_cmd.transaction_id = 0;
+                    publish_cmd.arguments.push_back(amf0::Value::Null());
+                    publish_cmd.arguments.push_back(amf0::Value::String("stream"));
+                    publish_cmd.arguments.push_back(amf0::Value::String("live"));
+                    
+                    out->pusher->send_command(publish_cmd);
+                    out->pusher->flush();
+                    
+                    // Mark as ready and flush pending packets
+                    on_publish_ready(out);
+                }
+            }
+        }
+    });
+    
+    output->pusher->set_disconnected_callback([this, out = output]() {
+        Logger::warn("Output disconnected: ", out->config.name);
+        out->connected = false;
+        out->publishing = false;
+    });
+}
+
+void Transcoder::on_publish_ready(Output* output) {
+    output->publishing = true;
+    
+    Logger::info("Output ", output->config.name, " ready, flushing ", 
+                 output->pending_video.size(), " video + ", 
+                 output->pending_audio.size(), " audio buffered packets");
+    
+    // Flush pending video packets
+    for (auto& packet : output->pending_video) {
+        // Build FLV video tag
+        std::vector<uint8_t> flv_data;
+        flv_data.reserve(5 + packet.data.size());
+        
+        uint8_t frame_type = packet.keyframe ? 0x10 : 0x20;
+        uint8_t codec_id = 0x07;
+        flv_data.push_back(frame_type | codec_id);
+        flv_data.push_back(0x01);
+        flv_data.push_back(0x00);
+        flv_data.push_back(0x00);
+        flv_data.push_back(0x00);
+        flv_data.insert(flv_data.end(), packet.data.begin(), packet.data.end());
+        
+        rtmp::Message msg;
+        msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
+        msg.timestamp = packet.timestamp;
+        msg.stream_id = 1;
+        msg.payload = std::move(flv_data);
+        
+        output->pusher->send_message(msg);
+    }
+    output->pending_video.clear();
+    
+    // Flush pending audio packets
+    for (auto& packet : output->pending_audio) {
+        // Build FLV audio tag
+        std::vector<uint8_t> flv_data;
+        flv_data.reserve(2 + packet.data.size());
+        
+        uint8_t sound_format = 0xA0;
+        uint8_t sound_rate = 0x03;
+        uint8_t sound_size = 0x01;
+        uint8_t sound_type = 0x01;
+        flv_data.push_back(sound_format | (sound_rate << 2) | (sound_size << 1) | sound_type);
+        flv_data.push_back(0x01);
+        flv_data.insert(flv_data.end(), packet.data.begin(), packet.data.end());
+        
+        rtmp::Message msg;
+        msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
+        msg.timestamp = packet.timestamp;
+        msg.stream_id = 1;
+        msg.payload = std::move(flv_data);
+        
+        output->pusher->send_message(msg);
+    }
+    output->pending_audio.clear();
 }
 
 }
