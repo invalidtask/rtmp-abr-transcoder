@@ -466,7 +466,9 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
                         out->stream_id = static_cast<uint32_t>(cmd->arguments[1].as_number());
                         Logger::debug("Received stream_id: ", out->stream_id);
                     } else {
-                        Logger::error("Invalid createStream response - no stream_id");
+                        Logger::error("Invalid createStream response - no stream_id for ", out->config.name);
+                        out->connected = false;
+                        out->publishing = false;
                         return;
                     }
                     
@@ -509,6 +511,9 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
                             Logger::info("Publish confirmed for ", out->config.name);
                             // Mark as ready and flush pending packets
                             on_publish_ready(out);
+                        } else if (code.find("NetStream.Publish.") == 0) {
+                            // Log other publish-related status codes for diagnostics
+                            Logger::warn("Publish status for ", out->config.name, ": ", code);
                         }
                     }
                 }
