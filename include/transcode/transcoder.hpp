@@ -46,12 +46,20 @@ private:
         bool publishing = false;
         bool video_initialized = false;
         bool audio_initialized = false;
+        std::vector<EncodedPacket> pending_video;
+        std::vector<EncodedPacket> pending_audio;
     };
     
     void process_video_frame(const VideoFrame& frame);
     void process_audio_frame(const AudioFrame& frame);
     void push_video_packet(Output& output, const EncodedPacket& packet);
     void push_audio_packet(Output& output, const EncodedPacket& packet);
+    void setup_pusher_callbacks(Output* output);
+    void on_publish_ready(Output* output);
+    
+    // Helper methods for building FLV packets
+    std::vector<uint8_t> build_flv_video_packet(const EncodedPacket& packet);
+    std::vector<uint8_t> build_flv_audio_packet(const EncodedPacket& packet);
     
     EpollLoop& loop_;
     std::unique_ptr<H264Decoder> video_decoder_;

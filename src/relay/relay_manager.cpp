@@ -296,8 +296,9 @@ void RelayManager::handle_publisher_command(Publisher* pub, const rtmp::CommandM
             if (transcoder_) {
                 Logger::info("Starting transcoder for stream: ", pub->stream_id.to_string());
                 transcoder_->start();
-                // Set default metadata (will be updated from actual stream)
-                transcoder_->on_source_metadata(1920, 1080, 30, 44100, 2);
+                // Note: Actual dimensions will be detected from first decoded frame
+                // Set placeholder metadata for now
+                transcoder_->on_source_metadata(0, 0, 30, 44100, 2);
             } else {
                 create_pusher(pub->stream_id);
             }
