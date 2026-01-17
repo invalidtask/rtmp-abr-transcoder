@@ -406,12 +406,27 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
         // Parse app and tcUrl from rtmp_url
         std::string url = out->config.rtmp_url;
         size_t proto_end = url.find("://");
+        if (proto_end == std::string::npos) {
+            Logger::error("Invalid URL format (missing ://): ", url);
+            return;
+        }
+        
         size_t host_start = proto_end + 3;
         size_t path_start = url.find('/', host_start);
-        std::string path = path_start != std::string::npos ? url.substr(path_start) : "/";
+        if (path_start == std::string::npos) {
+            Logger::error("Invalid URL format (missing path): ", url);
+            return;
+        }
+        
+        std::string path = url.substr(path_start);
         
         size_t app_end = path.find('/', 1);
         std::string app = app_end != std::string::npos ? path.substr(1, app_end - 1) : path.substr(1);
+        
+        if (app.empty()) {
+            Logger::error("Invalid URL format (missing app): ", url);
+            return;
+        }
         
         // Build tcUrl (rtmp://host:port/app)
         std::string tcUrl = url.substr(0, path_start + app.size() + 1);
@@ -528,7 +543,7 @@ void Transcoder::parse_avc_decoder_config(const uint8_t* data, size_t size) {
     size_t offset = 6;
     
     // Extract and feed SPS to decoder
-    for (int i = 0; i < num_sps && offset + 2 <= size; i++) {
+    for (size_t i = 0; i < num_sps && offset + 2 <= size; i++) {
         uint16_t sps_len = (data[offset] << 8) | data[offset + 1];
         offset += 2;
         
@@ -547,7 +562,7 @@ void Transcoder::parse_avc_decoder_config(const uint8_t* data, size_t size) {
     // Extract and feed PPS similarly
     if (offset < size) {
         uint8_t num_pps = data[offset++];
-        for (int i = 0; i < num_pps && offset + 2 <= size; i++) {
+        for (size_t i = 0; i < num_pps && offset + 2 <= size; i++) {
             uint16_t pps_len = (data[offset] << 8) | data[offset + 1];
             offset += 2;
             
