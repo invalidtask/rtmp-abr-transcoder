@@ -61,7 +61,6 @@ void Transcoder::on_video_data(const uint8_t* data, size_t size, uint32_t timest
     // byte 1: AVC packet type (0=sequence header, 1=NALU, 2=end of sequence)
     // bytes 2-4: composition time (24 bits)
     
-    uint8_t frame_type = (data[0] >> 4) & 0x0F;
     uint8_t codec_id = data[0] & 0x0F;
     
     if (codec_id != 7) {  // AVC/H.264
@@ -78,20 +77,47 @@ void Transcoder::on_video_data(const uint8_t* data, size_t size, uint32_t timest
     if (avc_packet_type == 0) {
         // Sequence header (contains SPS/PPS)
         Logger::debug("Received AVC sequence header");
-        // We'll use the decoder to extract config
+        if (size >= 5) {
+            parse_avc_decoder_config(data + 5, size - 5);
+        }
         return;
     } else if (avc_packet_type == 1) {
-        // NALU data
+        // NALU data in AVCC format (length-prefixed)
         if (size < 5) {
             return;
         }
         
-        const uint8_t* nalu_data = data + 5;
-        size_t nalu_size = size - 5;
+        // Convert AVCC to Annex-B format
+        std::vector<uint8_t> annexb_data;
+        const uint8_t* avcc_data = data + 5;
+        size_t avcc_size = size - 5;
+        size_t offset = 0;
         
-        // Decode the frame
+        while (offset + nalu_length_size_ <= avcc_size) {
+            uint32_t nalu_len = 0;
+            for (int i = 0; i < nalu_length_size_; i++) {
+                nalu_len = (nalu_len << 8) | avcc_data[offset + i];
+            }
+            offset += nalu_length_size_;
+            
+            if (offset + nalu_len > avcc_size) break;
+            
+            // Add Annex-B startcode
+            annexb_data.push_back(0x00);
+            annexb_data.push_back(0x00);
+            annexb_data.push_back(0x00);
+            annexb_data.push_back(0x01);
+            
+            // Add NALU data
+            annexb_data.insert(annexb_data.end(), 
+                              avcc_data + offset, 
+                              avcc_data + offset + nalu_len);
+            offset += nalu_len;
+        }
+        
+        // Decode Annex-B data
         std::vector<VideoFrame> frames;
-        if (video_decoder_->decode(nalu_data, nalu_size, timestamp, frames)) {
+        if (video_decoder_->decode(annexb_data.data(), annexb_data.size(), timestamp, frames)) {
             for (auto& frame : frames) {
                 process_video_frame(frame);
             }
@@ -128,11 +154,17 @@ void Transcoder::on_audio_data(const uint8_t* data, size_t size, uint32_t timest
         if (!audio_decoder_->initialize(asc_data, asc_size)) {
             Logger::error("Failed to initialize audio decoder with ASC");
         } else {
-            Logger::debug("Audio decoder configured with ASC");
+            Logger::info("AAC decoder initialized with ASC");
+            audio_initialized_ = true;
         }
         return;
     } else if (aac_packet_type == 1) {
-        // Raw AAC data
+        // Raw AAC data - only decode if decoder is initialized
+        if (!audio_initialized_) {
+            Logger::debug("Skipping AAC frame - decoder not initialized");
+            return;
+        }
+        
         if (size < 3) {
             return;
         }
@@ -371,14 +403,43 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
         Logger::info("Output connected: ", out->config.name);
         out->connected = true;
         
+        // Parse app and tcUrl from rtmp_url
+        std::string url = out->config.rtmp_url;
+        size_t proto_end = url.find("://");
+        if (proto_end == std::string::npos) {
+            Logger::error("Invalid URL format (missing ://): ", url);
+            return;
+        }
+        
+        size_t host_start = proto_end + 3;
+        size_t path_start = url.find('/', host_start);
+        if (path_start == std::string::npos) {
+            Logger::error("Invalid URL format (missing path): ", url);
+            return;
+        }
+        
+        std::string path = url.substr(path_start);
+        
+        size_t app_end = path.find('/', 1);
+        std::string app = app_end != std::string::npos ? path.substr(1, app_end - 1) : path.substr(1);
+        
+        if (app.empty()) {
+            Logger::error("Invalid URL format (missing app): ", url);
+            return;
+        }
+        
+        // Build tcUrl (rtmp://host:port/app)
+        std::string tcUrl = url.substr(0, path_start + app.size() + 1);
+        
         // Send connect command
         rtmp::CommandMessage connect_cmd;
         connect_cmd.name = "connect";
         connect_cmd.transaction_id = 1;
         
         amf0::Value::ObjectType connect_obj;
-        connect_obj["app"] = amf0::Value::String("live");
+        connect_obj["app"] = amf0::Value::String(app);
         connect_obj["type"] = amf0::Value::String("nonprivate");
+        connect_obj["tcUrl"] = amf0::Value::String(tcUrl);
         connect_cmd.arguments.push_back(amf0::Value::Object(connect_obj));
         
         out->pusher->send_command(connect_cmd);
@@ -400,11 +461,17 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
                     out->pusher->flush();
                 } else if (cmd->transaction_id == 2) {
                     // CreateStream succeeded, send publish
+                    // Extract stream name from URL (last path component)
+                    std::string url = out->config.rtmp_url;
+                    size_t last_slash = url.rfind('/');
+                    std::string stream_name = (last_slash != std::string::npos) ? 
+                                               url.substr(last_slash + 1) : "stream";
+                    
                     rtmp::CommandMessage publish_cmd;
                     publish_cmd.name = "publish";
                     publish_cmd.transaction_id = 0;
                     publish_cmd.arguments.push_back(amf0::Value::Null());
-                    publish_cmd.arguments.push_back(amf0::Value::String("stream"));
+                    publish_cmd.arguments.push_back(amf0::Value::String(stream_name));
                     publish_cmd.arguments.push_back(amf0::Value::String("live"));
                     
                     out->pusher->send_command(publish_cmd);
@@ -454,6 +521,64 @@ void Transcoder::on_publish_ready(Output* output) {
         output->pusher->send_message(msg);
     }
     output->pending_audio.clear();
+}
+
+void Transcoder::parse_avc_decoder_config(const uint8_t* data, size_t size) {
+    if (size < 7) {
+        return;
+    }
+    
+    // AVCDecoderConfigurationRecord format:
+    // byte 0: configurationVersion
+    // byte 1: AVCProfileIndication
+    // byte 2: profile_compatibility
+    // byte 3: AVCLevelIndication
+    // byte 4: (lengthSizeMinusOne & 0x03) | 0xFC
+    // byte 5: (numOfSPS & 0x1F) | 0xE0
+    // bytes 6-7: SPS length, followed by SPS
+    
+    nalu_length_size_ = (data[4] & 0x03) + 1;
+    
+    uint8_t num_sps = data[5] & 0x1F;
+    size_t offset = 6;
+    
+    // Extract and feed SPS to decoder
+    for (size_t i = 0; i < num_sps && offset + 2 <= size; i++) {
+        uint16_t sps_len = (data[offset] << 8) | data[offset + 1];
+        offset += 2;
+        
+        if (offset + sps_len <= size) {
+            // Feed SPS as Annex-B format
+            std::vector<uint8_t> sps_annexb = {0x00, 0x00, 0x00, 0x01};
+            sps_annexb.insert(sps_annexb.end(), data + offset, data + offset + sps_len);
+            
+            std::vector<VideoFrame> dummy;
+            video_decoder_->decode(sps_annexb.data(), sps_annexb.size(), 0, dummy);
+            
+            offset += sps_len;
+        }
+    }
+    
+    // Extract and feed PPS similarly
+    if (offset < size) {
+        uint8_t num_pps = data[offset++];
+        for (size_t i = 0; i < num_pps && offset + 2 <= size; i++) {
+            uint16_t pps_len = (data[offset] << 8) | data[offset + 1];
+            offset += 2;
+            
+            if (offset + pps_len <= size) {
+                std::vector<uint8_t> pps_annexb = {0x00, 0x00, 0x00, 0x01};
+                pps_annexb.insert(pps_annexb.end(), data + offset, data + offset + pps_len);
+                
+                std::vector<VideoFrame> dummy;
+                video_decoder_->decode(pps_annexb.data(), pps_annexb.size(), 0, dummy);
+                
+                offset += pps_len;
+            }
+        }
+    }
+    
+    Logger::info("Parsed AVC decoder config, NALU length size: ", nalu_length_size_);
 }
 
 }

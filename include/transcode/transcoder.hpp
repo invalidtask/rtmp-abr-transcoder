@@ -56,6 +56,7 @@ private:
     void push_audio_packet(Output& output, const EncodedPacket& packet);
     void setup_pusher_callbacks(Output* output);
     void on_publish_ready(Output* output);
+    void parse_avc_decoder_config(const uint8_t* data, size_t size);
     
     // Helper methods for building FLV packets
     std::vector<uint8_t> build_flv_video_packet(const EncodedPacket& packet);
@@ -71,6 +72,9 @@ private:
     int source_fps_ = 30;
     int source_sample_rate_ = 44100;
     int source_channels_ = 2;
+    
+    bool audio_initialized_ = false;
+    int nalu_length_size_ = 4;
 };
 
 }
