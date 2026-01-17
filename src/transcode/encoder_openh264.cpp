@@ -179,6 +179,12 @@ bool H264Encoder::encode(const VideoFrame& frame, std::vector<EncodedPacket>& ou
             }
             
             int nal_size = nal_size_with_startcode - startcode_len;
+            if (nal_size <= 0) {
+                Logger::error("Invalid NAL size after removing start code");
+                nal_ptr += nal_size_with_startcode;
+                continue;
+            }
+            
             uint8_t* nal_data = nal_ptr + startcode_len;
             
             // Write 4-byte big-endian length prefix (AVCC format)
