@@ -250,7 +250,19 @@ void Transcoder::push_video_packet(Output& output, const EncodedPacket& packet) 
         return;
     }
     
-    // Build FLV video tag
+    // Build and send FLV video tag
+    rtmp::Message msg;
+    msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
+    msg.timestamp = packet.timestamp;
+    msg.stream_id = 1;
+    msg.payload = build_flv_video_packet(packet);
+    
+    output.pusher->send_message(msg);
+    
+    Logger::debug("Pushed video to ", output.config.name);
+}
+
+std::vector<uint8_t> Transcoder::build_flv_video_packet(const EncodedPacket& packet) {
     std::vector<uint8_t> flv_data;
     flv_data.reserve(5 + packet.data.size());
     
@@ -270,16 +282,7 @@ void Transcoder::push_video_packet(Output& output, const EncodedPacket& packet) 
     // Append NALU data
     flv_data.insert(flv_data.end(), packet.data.begin(), packet.data.end());
     
-    // Send as RTMP message
-    rtmp::Message msg;
-    msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
-    msg.timestamp = packet.timestamp;
-    msg.stream_id = 1;
-    msg.payload = std::move(flv_data);
-    
-    output.pusher->send_message(msg);
-    
-    Logger::debug("Pushed video to ", output.config.name);
+    return flv_data;
 }
 
 void Transcoder::push_audio_packet(Output& output, const EncodedPacket& packet) {
@@ -294,7 +297,19 @@ void Transcoder::push_audio_packet(Output& output, const EncodedPacket& packet) 
         return;
     }
     
-    // Build FLV audio tag
+    // Build and send FLV audio tag
+    rtmp::Message msg;
+    msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
+    msg.timestamp = packet.timestamp;
+    msg.stream_id = 1;
+    msg.payload = build_flv_audio_packet(packet);
+    
+    output.pusher->send_message(msg);
+    
+    Logger::debug("Pushed audio to ", output.config.name);
+}
+
+std::vector<uint8_t> Transcoder::build_flv_audio_packet(const EncodedPacket& packet) {
     std::vector<uint8_t> flv_data;
     flv_data.reserve(2 + packet.data.size());
     
@@ -311,16 +326,7 @@ void Transcoder::push_audio_packet(Output& output, const EncodedPacket& packet) 
     // Append AAC data
     flv_data.insert(flv_data.end(), packet.data.begin(), packet.data.end());
     
-    // Send as RTMP message
-    rtmp::Message msg;
-    msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
-    msg.timestamp = packet.timestamp;
-    msg.stream_id = 1;
-    msg.payload = std::move(flv_data);
-    
-    output.pusher->send_message(msg);
-    
-    Logger::debug("Pushed audio to ", output.config.name);
+    return flv_data;
 }
 
 bool Transcoder::start() {
@@ -427,24 +433,11 @@ void Transcoder::on_publish_ready(Output* output) {
     
     // Flush pending video packets
     for (auto& packet : output->pending_video) {
-        // Build FLV video tag
-        std::vector<uint8_t> flv_data;
-        flv_data.reserve(5 + packet.data.size());
-        
-        uint8_t frame_type = packet.keyframe ? 0x10 : 0x20;
-        uint8_t codec_id = 0x07;
-        flv_data.push_back(frame_type | codec_id);
-        flv_data.push_back(0x01);
-        flv_data.push_back(0x00);
-        flv_data.push_back(0x00);
-        flv_data.push_back(0x00);
-        flv_data.insert(flv_data.end(), packet.data.begin(), packet.data.end());
-        
         rtmp::Message msg;
         msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
         msg.timestamp = packet.timestamp;
         msg.stream_id = 1;
-        msg.payload = std::move(flv_data);
+        msg.payload = build_flv_video_packet(packet);
         
         output->pusher->send_message(msg);
     }
@@ -452,23 +445,11 @@ void Transcoder::on_publish_ready(Output* output) {
     
     // Flush pending audio packets
     for (auto& packet : output->pending_audio) {
-        // Build FLV audio tag
-        std::vector<uint8_t> flv_data;
-        flv_data.reserve(2 + packet.data.size());
-        
-        uint8_t sound_format = 0xA0;
-        uint8_t sound_rate = 0x03;
-        uint8_t sound_size = 0x01;
-        uint8_t sound_type = 0x01;
-        flv_data.push_back(sound_format | (sound_rate << 2) | (sound_size << 1) | sound_type);
-        flv_data.push_back(0x01);
-        flv_data.insert(flv_data.end(), packet.data.begin(), packet.data.end());
-        
         rtmp::Message msg;
         msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
         msg.timestamp = packet.timestamp;
         msg.stream_id = 1;
-        msg.payload = std::move(flv_data);
+        msg.payload = build_flv_audio_packet(packet);
         
         output->pusher->send_message(msg);
     }

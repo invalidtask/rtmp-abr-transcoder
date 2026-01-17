@@ -57,6 +57,10 @@ private:
     void setup_pusher_callbacks(Output* output);
     void on_publish_ready(Output* output);
     
+    // Helper methods for building FLV packets
+    std::vector<uint8_t> build_flv_video_packet(const EncodedPacket& packet);
+    std::vector<uint8_t> build_flv_audio_packet(const EncodedPacket& packet);
+    
     EpollLoop& loop_;
     std::unique_ptr<H264Decoder> video_decoder_;
     std::unique_ptr<AACDecoder> audio_decoder_;
