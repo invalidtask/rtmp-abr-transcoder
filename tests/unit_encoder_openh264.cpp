@@ -106,18 +106,19 @@ TEST_CASE(encoder_does_not_output_annexb) {
     const auto& packet = packets[0];
     
     // Check that we don't have Annex-B start codes (00 00 00 01 or 00 00 01)
-    // at positions where NAL units start
+    // anywhere in the packet data
     for (size_t i = 0; i + 4 <= packet.data.size(); i++) {
-        // A 4-byte Annex-B start code
-        if (i > 0 && packet.data[i] == 0x00 && packet.data[i+1] == 0x00 && 
+        // Check for 4-byte Annex-B start code
+        if (packet.data[i] == 0x00 && packet.data[i+1] == 0x00 && 
             packet.data[i+2] == 0x00 && packet.data[i+3] == 0x01) {
-            // We found an Annex-B start code - this should NOT happen
+            // We found an Annex-B start code - this should NOT happen in AVCC format
             REQUIRE(false); // Fail the test
         }
-        
-        // A 3-byte Annex-B start code
-        if (i > 0 && i + 3 <= packet.data.size() && 
-            packet.data[i] == 0x00 && packet.data[i+1] == 0x00 && 
+    }
+    
+    for (size_t i = 0; i + 3 <= packet.data.size(); i++) {
+        // Check for 3-byte Annex-B start code
+        if (packet.data[i] == 0x00 && packet.data[i+1] == 0x00 && 
             packet.data[i+2] == 0x01) {
             // Check if this could be a start code (not just random data)
             // Start codes should be followed by a valid NAL header

@@ -5,6 +5,17 @@
 
 namespace transcode {
 
+// Helper function to detect and skip Annex-B start code
+// Returns the start code length (3 or 4 bytes)
+static int get_startcode_length(const uint8_t* data, int size) {
+    if (size >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1) {
+        return 4;  // 00 00 00 01
+    } else if (size >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1) {
+        return 3;  // 00 00 01
+    }
+    return 0;  // No start code found
+}
+
 struct H264Encoder::Impl {
     ISVCEncoder* encoder = nullptr;
     bool initialized = false;
@@ -119,12 +130,8 @@ bool H264Encoder::encode(const VideoFrame& frame, std::vector<EncodedPacket>& ou
             for (int nal = 0; nal < layer_info->iNalCount; nal++) {
                 int nal_size_with_startcode = layer_info->pNalLengthInByte[nal];
                 
-                // Skip the start code (3 or 4 bytes: 00 00 01 or 00 00 00 01)
-                int startcode_len = 4;
-                if (nal_size_with_startcode >= 3 && 
-                    nal_ptr[0] == 0 && nal_ptr[1] == 0 && nal_ptr[2] == 1) {
-                    startcode_len = 3;
-                }
+                // Skip the start code
+                int startcode_len = get_startcode_length(nal_ptr, nal_size_with_startcode);
                 
                 int nal_size = nal_size_with_startcode - startcode_len;
                 uint8_t* nal_data = nal_ptr + startcode_len;
@@ -158,12 +165,8 @@ bool H264Encoder::encode(const VideoFrame& frame, std::vector<EncodedPacket>& ou
         for (int nal = 0; nal < layer_info->iNalCount; nal++) {
             int nal_size_with_startcode = layer_info->pNalLengthInByte[nal];
             
-            // Skip the start code (3 or 4 bytes: 00 00 01 or 00 00 00 01)
-            int startcode_len = 4;
-            if (nal_size_with_startcode >= 3 && 
-                nal_ptr[0] == 0 && nal_ptr[1] == 0 && nal_ptr[2] == 1) {
-                startcode_len = 3;
-            }
+            // Skip the start code
+            int startcode_len = get_startcode_length(nal_ptr, nal_size_with_startcode);
             
             int nal_size = nal_size_with_startcode - startcode_len;
             uint8_t* nal_data = nal_ptr + startcode_len;
