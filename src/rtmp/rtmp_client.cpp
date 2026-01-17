@@ -99,7 +99,7 @@ void Client::disconnect() {
 void Client::send_message(const Message& msg) {
     if (session_) {
         session_->send_message(msg);
-        if (socket_.is_valid() && session_->has_outgoing_data()) {
+        if (socket_.is_valid() && (session_->has_outgoing_data() || !write_buffer_.empty())) {
             loop_.modify(socket_.fd(), EPOLLIN | EPOLLOUT);
         }
     }
@@ -108,71 +108,85 @@ void Client::send_message(const Message& msg) {
 void Client::send_command(const CommandMessage& cmd, uint32_t chunk_stream_id) {
     if (session_) {
         session_->send_command(cmd, chunk_stream_id);
-        if (socket_.is_valid() && session_->has_outgoing_data()) {
+        if (socket_.is_valid() && (session_->has_outgoing_data() || !write_buffer_.empty())) {
             loop_.modify(socket_.fd(), EPOLLIN | EPOLLOUT);
         }
     }
 }
 
 void Client::flush() {
-    if (!session_ || !session_->has_outgoing_data() || !socket_.is_valid()) {
+    if (!socket_.is_valid()) {
         return;
     }
     
-    // Try to write immediately to avoid relying solely on EPOLLOUT
-    auto data = session_->get_outgoing_data();
-    if (data.empty()) {
+    // Move any session outgoing data into our write buffer
+    if (session_ && session_->has_outgoing_data()) {
+        auto data = session_->get_outgoing_data();
+        write_buffer_.insert(write_buffer_.end(), data.begin(), data.end());
+    }
+    
+    if (write_buffer_.empty()) {
         return;
     }
     
-    Logger::debug("Flushing ", data.size(), " bytes to pusher socket");
-    auto result = socket_.write(data.data(), data.size());
+    Logger::debug("Flushing ", write_buffer_.size(), " bytes to pusher socket");
+    auto result = socket_.write(write_buffer_.data(), write_buffer_.size());
     
     if (result.is_err()) {
         Logger::error("Flush failed: ", result.error());
-        // On error, data is lost but connection will likely be closed anyway
+        // Keep data in write_buffer_ for retry
         return;
     }
     
     size_t written = result.value();
     Logger::debug("Wrote ", written, " bytes");
     
-    if (written < data.size()) {
-        // Partial write - put unwritten data back in session buffer
-        // This is the critical fix: we need to preserve unwritten data
-        Logger::warn("Partial flush occurred, ", written, " of ", data.size(), " bytes written");
-        // TODO: In a proper implementation, we'd put the unwritten data back
-        // For now, this matches the existing handle_writable() behavior which also
-        // doesn't handle partial writes (see comment there about production needing persistent write buffer)
+    if (written < write_buffer_.size()) {
+        Logger::warn("Partial flush occurred, ", written, " of ", write_buffer_.size(), " bytes written");
+        // Erase only the written bytes, preserve the rest
+        write_buffer_.erase(write_buffer_.begin(), write_buffer_.begin() + written);
+        // Register for EPOLLOUT to continue writing when socket is writable
+        loop_.modify(socket_.fd(), EPOLLIN | EPOLLOUT);
+    } else {
+        // All data written successfully
+        write_buffer_.clear();
     }
 }
 
 void Client::handle_writable() {
     Logger::debug("Client::handle_writable called");
-    if (!session_ || !session_->has_outgoing_data()) {
+    
+    // Move any session outgoing data into our write buffer
+    if (session_ && session_->has_outgoing_data()) {
+        auto data = session_->get_outgoing_data();
+        write_buffer_.insert(write_buffer_.end(), data.begin(), data.end());
+    }
+    
+    if (write_buffer_.empty()) {
         Logger::debug("No outgoing data, switching to EPOLLIN only");
         loop_.modify(socket_.fd(), EPOLLIN);
         return;
     }
     
-    auto data = session_->get_outgoing_data();
-    if (data.empty()) {
-        loop_.modify(socket_.fd(), EPOLLIN);
-        return;
-    }
-    
-    Logger::debug("Writing ", data.size(), " bytes to socket");
-    auto write_result = socket_.write(data.data(), data.size());
+    Logger::debug("Writing ", write_buffer_.size(), " bytes to socket");
+    auto write_result = socket_.write(write_buffer_.data(), write_buffer_.size());
     if (write_result.is_err()) {
         Logger::error("Write error: ", write_result.error());
         cleanup();
         return;
     }
     
-    // Note: For simplicity, we assume all data is written in relay scenarios
-    // In production, would need persistent write buffer for partial writes
-    if (write_result.value() < data.size()) {
-        Logger::warn("Partial write occurred, ", write_result.value(), " of ", data.size(), " bytes written");
+    size_t written = write_result.value();
+    if (written < write_buffer_.size()) {
+        Logger::warn("Partial write occurred, ", written, " of ", write_buffer_.size(), " bytes written");
+        // Erase only the written bytes, preserve the rest
+        write_buffer_.erase(write_buffer_.begin(), write_buffer_.begin() + written);
+        // Keep EPOLLOUT registered to continue writing
+    } else {
+        // All data written successfully
+        write_buffer_.clear();
+        // Switch back to EPOLLIN only
+        loop_.modify(socket_.fd(), EPOLLIN);
     }
 }
 

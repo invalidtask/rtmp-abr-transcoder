@@ -49,6 +49,7 @@ private:
     DisconnectedCallback disconnected_callback_;
     
     std::vector<uint8_t> read_buffer_;
+    std::vector<uint8_t> write_buffer_;
 };
 
 }
