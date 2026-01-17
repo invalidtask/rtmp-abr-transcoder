@@ -286,7 +286,7 @@ void Transcoder::push_video_packet(Output& output, const EncodedPacket& packet) 
     rtmp::Message msg;
     msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
     msg.timestamp = packet.timestamp;
-    msg.stream_id = 1;
+    msg.stream_id = output.stream_id;
     msg.payload = build_flv_video_packet(packet);
     
     output.pusher->send_message(msg);
@@ -333,7 +333,7 @@ void Transcoder::push_audio_packet(Output& output, const EncodedPacket& packet) 
     rtmp::Message msg;
     msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
     msg.timestamp = packet.timestamp;
-    msg.stream_id = 1;
+    msg.stream_id = output.stream_id;
     msg.payload = build_flv_audio_packet(packet);
     
     output.pusher->send_message(msg);
@@ -460,13 +460,23 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
                     out->pusher->send_command(create_stream);
                     out->pusher->flush();
                 } else if (cmd->transaction_id == 2) {
-                    // CreateStream succeeded, send publish
+                    // CreateStream succeeded, extract stream_id and send publish
+                    // The stream_id is returned as the second argument (after null)
+                    if (cmd->arguments.size() >= 2 && cmd->arguments[1].is_number()) {
+                        out->stream_id = static_cast<uint32_t>(cmd->arguments[1].as_number());
+                        Logger::debug("Received stream_id: ", out->stream_id);
+                    } else {
+                        Logger::error("Invalid createStream response - no stream_id");
+                        return;
+                    }
+                    
                     // Extract stream name from URL (last path component)
                     std::string url = out->config.rtmp_url;
                     size_t last_slash = url.rfind('/');
                     std::string stream_name = (last_slash != std::string::npos) ? 
                                                url.substr(last_slash + 1) : "stream";
                     
+                    // Build publish command
                     rtmp::CommandMessage publish_cmd;
                     publish_cmd.name = "publish";
                     publish_cmd.transaction_id = 0;
@@ -474,11 +484,33 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
                     publish_cmd.arguments.push_back(amf0::Value::String(stream_name));
                     publish_cmd.arguments.push_back(amf0::Value::String("live"));
                     
-                    out->pusher->send_command(publish_cmd);
+                    // Send publish command on the correct stream_id
+                    rtmp::Message publish_msg;
+                    publish_msg.type_id = static_cast<uint8_t>(rtmp::MessageType::CommandAMF0);
+                    publish_msg.timestamp = 0;
+                    publish_msg.stream_id = out->stream_id;
+                    publish_msg.payload = publish_cmd.encode();
+                    
+                    out->pusher->send_message(publish_msg);
                     out->pusher->flush();
                     
-                    // Mark as ready and flush pending packets
-                    on_publish_ready(out);
+                    Logger::debug("Sent publish command on stream_id: ", out->stream_id);
+                }
+            } else if (cmd && cmd->name == "onStatus") {
+                // Handle onStatus response to confirm publish success
+                if (cmd->arguments.size() >= 2 && cmd->arguments[1].is_object()) {
+                    auto info = cmd->arguments[1].as_object();
+                    auto code_it = info.find("code");
+                    if (code_it != info.end() && code_it->second.is_string()) {
+                        std::string code = code_it->second.as_string();
+                        Logger::debug("Received onStatus: ", code);
+                        
+                        if (code == "NetStream.Publish.Start") {
+                            Logger::info("Publish confirmed for ", out->config.name);
+                            // Mark as ready and flush pending packets
+                            on_publish_ready(out);
+                        }
+                    }
                 }
             }
         }
@@ -503,7 +535,7 @@ void Transcoder::on_publish_ready(Output* output) {
         rtmp::Message msg;
         msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
         msg.timestamp = packet.timestamp;
-        msg.stream_id = 1;
+        msg.stream_id = output->stream_id;
         msg.payload = build_flv_video_packet(packet);
         
         output->pusher->send_message(msg);
@@ -515,7 +547,7 @@ void Transcoder::on_publish_ready(Output* output) {
         rtmp::Message msg;
         msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
         msg.timestamp = packet.timestamp;
-        msg.stream_id = 1;
+        msg.stream_id = output->stream_id;
         msg.payload = build_flv_audio_packet(packet);
         
         output->pusher->send_message(msg);

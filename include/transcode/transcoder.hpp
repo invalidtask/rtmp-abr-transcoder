@@ -46,6 +46,7 @@ private:
         bool publishing = false;
         bool video_initialized = false;
         bool audio_initialized = false;
+        uint32_t stream_id = 0;
         std::vector<EncodedPacket> pending_video;
         std::vector<EncodedPacket> pending_audio;
     };

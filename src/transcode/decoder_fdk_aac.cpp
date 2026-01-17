@@ -25,7 +25,7 @@ bool AACDecoder::initialize(const uint8_t* asc_data, size_t asc_size) {
         return true;
     }
     
-    impl_->decoder = aacDecoder_Open(TT_MP4_ADTS, 1);
+    impl_->decoder = aacDecoder_Open(TT_MP4_RAW, 1);
     if (!impl_->decoder) {
         Logger::error("Failed to create FDK-AAC decoder");
         return false;
