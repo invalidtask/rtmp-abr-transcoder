@@ -11,14 +11,9 @@ constexpr uint8_t AVC_FALLBACK_PROFILE = 0x42;  // Baseline profile
 constexpr uint8_t AVC_FALLBACK_PROFILE_COMPAT = 0x00;
 constexpr uint8_t AVC_FALLBACK_LEVEL = 0x1E;  // Level 3.0
 
-// Framerate detection constants
-constexpr uint64_t FPS_DETECTION_MIN_FRAMES = 30;  // Minimum frames before detecting FPS
-constexpr uint64_t FPS_DETECTION_MAX_FRAMES = 60;  // Maximum frames to use for FPS detection
-constexpr int MIN_VALID_FPS = 10;  // Minimum valid framerate
-constexpr int MAX_VALID_FPS = 60;  // Maximum valid framerate
-
-// AAC encoding constants
-constexpr int AAC_SAMPLES_PER_FRAME = 1024;  // AAC typically uses 1024 samples per frame
+// Encoder defaults - fixed FPS for rate control (timestamps come from passthrough)
+constexpr int ENCODER_DEFAULT_FPS = 30;
+constexpr int ENCODER_DEFAULT_GOP_SIZE = 60;  // 2 second GOP at 30fps
 
 
 Transcoder::Transcoder(EpollLoop& loop)
@@ -204,56 +199,51 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
         Logger::info("Detected source resolution: ", source_width_, "x", source_height_);
     }
     
-    // Increment frame count for fps detection and tracking
+    // Increment frame count for statistics
     video_frame_count_++;
     
-    // Framerate detection - track timestamps to calculate actual fps
-    if (!fps_detected_) {
-        if (video_frame_count_ == 1) {
-            first_video_pts_ = frame.timestamp;
-            last_video_pts_ = frame.timestamp;
+    // Set base timestamp on first keyframe after publishing starts
+    // We wait for a keyframe to ensure clean playback start
+    // This drops frames for all outputs until we get the first keyframe
+    if (publishing_started_ && !base_video_timestamp_set_) {
+        if (frame.keyframe) {
+            base_video_timestamp_ = frame.timestamp;
+            base_video_timestamp_set_ = true;
+            Logger::info("Video base timestamp set to ", base_video_timestamp_, " on keyframe");
         } else {
-            last_video_pts_ = frame.timestamp;
-            
-            // Detect fps after receiving ~30-60 frames
-            if (video_frame_count_ >= FPS_DETECTION_MIN_FRAMES && video_frame_count_ <= FPS_DETECTION_MAX_FRAMES) {
-                uint64_t time_diff = last_video_pts_ - first_video_pts_;
-                if (time_diff > 0) {
-                    // Calculate fps: fps = (frame_count - 1) * 1000 / time_diff_ms
-                    // (frame_count - 1 because we're measuring intervals between frames)
-                    int calculated_fps = static_cast<int>(((video_frame_count_ - 1) * 1000 + time_diff / 2) / time_diff);
-                    
-                    // Cap between reasonable values
-                    if (calculated_fps >= MIN_VALID_FPS && calculated_fps <= MAX_VALID_FPS) {
-                        detected_fps_ = calculated_fps;
-                        fps_detected_ = true;
-                        Logger::info("Detected source framerate: ", detected_fps_, " fps (calculated from ", 
-                                   video_frame_count_, " frames over ", time_diff, " ms)");
-                    }
-                }
-            }
+            Logger::debug("Waiting for keyframe to set base video timestamp");
+            return;  // Drop non-keyframes until we get a keyframe
         }
     }
     
-    Logger::debug("Processing video frame: ", frame.width, "x", frame.height);
+    // Drop frames if base timestamp not yet set
+    if (!base_video_timestamp_set_) {
+        Logger::debug("Dropping video frame - base timestamp not set");
+        return;
+    }
     
-    // Wait for FPS detection before initializing encoders for better accuracy
-    // Use detected fps if available, otherwise fall back to configured source fps
-    int effective_fps = fps_detected_ ? detected_fps_ : source_fps_;
+    // Calculate output timestamp using passthrough from input
+    // Protect against underflow in case of out-of-order frames
+    uint32_t output_ts = 0;
+    if (frame.timestamp >= base_video_timestamp_) {
+        output_ts = frame.timestamp - base_video_timestamp_;
+    } else {
+        Logger::warn("Video timestamp ", frame.timestamp, " is less than base ", 
+                     base_video_timestamp_, " - using 0");
+    }
     
-    // Skip encoder initialization until FPS is detected (unless we're past FPS_DETECTION_MAX_FRAMES timeout)
-    // This ensures encoders use the correct detected framerate instead of the configured value
-    bool can_initialize_encoder = fps_detected_ || (video_frame_count_ > FPS_DETECTION_MAX_FRAMES);
+    Logger::debug("Processing video frame: ", frame.width, "x", frame.height, 
+                  " timestamp=", frame.timestamp, " output_ts=", output_ts);
     
     for (auto& output : outputs_) {
-        // Initialize encoders only after FPS detection or timeout
-        if (!output->video_initialized && can_initialize_encoder) {
+        // Initialize encoders with fixed FPS for rate control
+        if (!output->video_initialized) {
             EncoderConfig enc_config;
             enc_config.width = output->config.width;
             enc_config.height = output->config.height;
             enc_config.bitrate_kbps = output->config.video_bitrate_kbps;
-            enc_config.fps = effective_fps;
-            enc_config.gop_size = effective_fps * 2;  // 2 second GOP
+            enc_config.fps = ENCODER_DEFAULT_FPS;
+            enc_config.gop_size = ENCODER_DEFAULT_GOP_SIZE;
             enc_config.preset = "fast";
             
             if (!output->video_encoder->initialize(enc_config)) {
@@ -271,17 +261,9 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
             Logger::info("Scaler initialized: ", frame.width, "x", frame.height, 
                         " -> ", output->config.width, "x", output->config.height);
             Logger::info("H264 encoder initialized: ", output->config.width, "x", output->config.height,
-                        " @ ", output->config.video_bitrate_kbps, "kbps, ", effective_fps, " fps");
+                        " @ ", output->config.video_bitrate_kbps, "kbps, ", ENCODER_DEFAULT_FPS, " fps (fixed for rate control)");
             
             output->video_initialized = true;
-        }
-        
-        // Skip processing if encoder not yet initialized (waiting for FPS detection)
-        // Frames during this period (typically 30-60 frames or 1-2 seconds) are decoded
-        // for FPS detection but not encoded/sent to output streams
-        if (!output->video_initialized) {
-            Logger::debug("Skipping frame for ", output->config.name, " - waiting for FPS detection");
-            continue;
         }
         
         // Scale the frame
@@ -298,21 +280,15 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
             continue;
         }
         
-        // Push each encoded packet with calculated timestamp
+        // Push each encoded packet with passthrough timestamp
         for (auto& packet : packets) {
-            // Override packet timestamp with calculated output timestamp
-            packet.timestamp = output_video_timestamp_;
+            // Use passthrough timestamp from input stream
+            packet.timestamp = output_ts;
             
             Logger::debug("Encoded ", output->config.name, ": ", packet.data.size(), 
                          " bytes, keyframe=", packet.keyframe, ", timestamp=", packet.timestamp);
             push_video_packet(*output, packet);
         }
-    }
-    
-    // Increment timestamp for next frame (after processing all packets)
-    // Use frame-count-based calculation to avoid floating-point accumulation errors
-    if (effective_fps > 0) {
-        output_video_timestamp_ = static_cast<uint32_t>((static_cast<uint64_t>(video_frame_count_) * 1000) / effective_fps);
     }
 }
 
@@ -322,6 +298,29 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
     // Track actual audio sample rate for accurate FLV packet building
     if (actual_audio_sample_rate_ != static_cast<uint32_t>(frame.sample_rate)) {
         actual_audio_sample_rate_ = frame.sample_rate;
+    }
+    
+    // Set base timestamp on first audio frame after publishing starts
+    if (publishing_started_ && !base_audio_timestamp_set_) {
+        base_audio_timestamp_ = frame.timestamp;
+        base_audio_timestamp_set_ = true;
+        Logger::info("Audio base timestamp set to ", base_audio_timestamp_);
+    }
+    
+    // Drop frames if base timestamp not yet set
+    if (!base_audio_timestamp_set_) {
+        Logger::debug("Dropping audio frame - base timestamp not set");
+        return;
+    }
+    
+    // Calculate output timestamp using passthrough from input
+    // Protect against underflow in case of out-of-order frames
+    uint32_t output_ts = 0;
+    if (frame.timestamp >= base_audio_timestamp_) {
+        output_ts = frame.timestamp - base_audio_timestamp_;
+    } else {
+        Logger::warn("Audio timestamp ", frame.timestamp, " is less than base ", 
+                     base_audio_timestamp_, " - using 0");
     }
     
     for (auto& output : outputs_) {
@@ -340,19 +339,10 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
         std::vector<EncodedPacket> packets;
         if (output->audio_encoder->encode(frame, packets)) {
             for (auto& packet : packets) {
-                // Override packet timestamp with calculated output timestamp
-                packet.timestamp = output_audio_timestamp_;
+                // Use passthrough timestamp from input stream
+                packet.timestamp = output_ts;
                 
                 push_audio_packet(*output, packet);
-            }
-            
-            // Increment timestamp based on actual samples encoded
-            // Calculate samples per channel from interleaved samples
-            if (frame.channels > 0 && frame.sample_rate > 0) {
-                uint64_t samples_per_channel = frame.samples.size() / frame.channels;
-                audio_sample_count_ += samples_per_channel;
-                // Calculate timestamp from total sample count for precision
-                output_audio_timestamp_ = static_cast<uint32_t>((static_cast<uint64_t>(audio_sample_count_) * 1000) / frame.sample_rate);
             }
         }
     }
@@ -360,13 +350,8 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
 
 void Transcoder::push_video_packet(Output& output, const EncodedPacket& packet) {
     if (!output.publishing) {
-        // Buffer while waiting for connection
-        output.pending_video.push_back(packet);
-        if (output.pending_video.size() > 300) {  // ~10 seconds at 30fps
-            output.pending_video.erase(output.pending_video.begin());
-        }
-        Logger::debug("Buffering video packet for ", output.config.name, 
-                     " (not yet publishing), buffer size: ", output.pending_video.size());
+        // Drop packets before publishing - they'll have wrong timestamps
+        Logger::debug("Dropping video packet for ", output.config.name, " (not yet publishing)");
         return;
     }
     
@@ -407,13 +392,8 @@ std::vector<uint8_t> Transcoder::build_flv_video_packet(const EncodedPacket& pac
 
 void Transcoder::push_audio_packet(Output& output, const EncodedPacket& packet) {
     if (!output.publishing) {
-        // Buffer while waiting for connection
-        output.pending_audio.push_back(packet);
-        if (output.pending_audio.size() > 1500) {  // ~10 seconds at 150 frames/sec
-            output.pending_audio.erase(output.pending_audio.begin());
-        }
-        Logger::debug("Buffering audio packet for ", output.config.name, 
-                     " (not yet publishing), buffer size: ", output.pending_audio.size());
+        // Drop packets before publishing - they'll have wrong timestamps
+        Logger::debug("Dropping audio packet for ", output.config.name, " (not yet publishing)");
         return;
     }
     
@@ -619,39 +599,20 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
 void Transcoder::on_publish_ready(Output* output) {
     output->publishing = true;
     
-    // Reset timestamps to start from 0 when first output begins publishing
-    // Check if any other output is already publishing
-    bool any_already_publishing = false;
-    for (const auto& out : outputs_) {
-        if (out.get() != output && out->publishing) {
-            any_already_publishing = true;
-            break;
-        }
+    // Set flag to start using passthrough timestamps on first output
+    // Once set, this flag stays true to maintain consistent timestamps across all outputs
+    // Base timestamps are reset via base_video_timestamp_set_ / base_audio_timestamp_set_ flags
+    if (!publishing_started_) {
+        publishing_started_ = true;
+        base_video_timestamp_set_ = false;  // Will be set on next keyframe
+        base_audio_timestamp_set_ = false;  // Will be set on next audio frame
+        Logger::info("Publishing started, will set base timestamps on next frames");
     }
     
-    // Only reset timestamps if this is the first output to start publishing
-    if (!any_already_publishing) {
-        output_video_timestamp_ = 0;
-        output_audio_timestamp_ = 0;
-        video_frame_count_ = 0;
-        audio_sample_count_ = 0;
-        Logger::info("First output ready - resetting timestamps and counters to 0");
-    }
-    
-    // Discard pending packets when resetting timestamps to avoid stale timestamp issues
-    // Pending packets were buffered before connection was ready, so discarding them
-    // ensures clean timestamp synchronization from the start of streaming
-    if (!any_already_publishing) {
-        Logger::info("Output ", output->config.name, " ready, discarding ", 
-                     output->pending_video.size(), " video + ", 
-                     output->pending_audio.size(), " audio buffered packets (stale timestamps)");
-        output->pending_video.clear();
-        output->pending_audio.clear();
-    } else {
-        Logger::info("Output ", output->config.name, " ready, flushing ", 
-                     output->pending_video.size(), " video + ", 
-                     output->pending_audio.size(), " audio buffered packets");
-    }
+    // Clear pending packets - they have pre-publishing timestamps
+    output->pending_video.clear();
+    output->pending_audio.clear();
+    Logger::info("Output ", output->config.name, " ready, discarded pending packets (stale timestamps)");
     
     // Send AVC sequence header if video encoder is initialized
     if (output->video_initialized) {
@@ -686,33 +647,6 @@ void Transcoder::on_publish_ready(Output* output) {
             output->pusher->flush();
             Logger::info("Sent AAC sequence header for ", output->config.name);
         }
-    }
-    
-    // Only flush pending packets if not discarded above
-    if (any_already_publishing) {
-        // Flush pending video packets
-        for (auto& packet : output->pending_video) {
-            rtmp::Message msg;
-            msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
-            msg.timestamp = packet.timestamp;
-            msg.stream_id = output->stream_id;
-            msg.payload = build_flv_video_packet(packet);
-            
-            output->pusher->send_message(msg);
-        }
-        output->pending_video.clear();
-        
-        // Flush pending audio packets
-        for (auto& packet : output->pending_audio) {
-            rtmp::Message msg;
-            msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
-            msg.timestamp = packet.timestamp;
-            msg.stream_id = output->stream_id;
-            msg.payload = build_flv_audio_packet(packet);
-            
-            output->pusher->send_message(msg);
-        }
-        output->pending_audio.clear();
     }
 }
 
