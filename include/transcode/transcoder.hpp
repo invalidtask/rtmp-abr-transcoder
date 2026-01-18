@@ -64,6 +64,7 @@ private:
     std::vector<uint8_t> build_flv_audio_packet(const EncodedPacket& packet);
     std::vector<uint8_t> build_avc_decoder_config(const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps);
     std::vector<uint8_t> build_aac_sequence_header(const std::vector<uint8_t>& asc);
+    uint8_t map_sample_rate_to_flv_sound_rate(uint32_t sample_rate);
     
     EpollLoop& loop_;
     std::unique_ptr<H264Decoder> video_decoder_;
@@ -84,6 +85,7 @@ private:
     uint32_t output_audio_timestamp_ = 0;
     uint64_t video_frame_count_ = 0;
     uint64_t audio_sample_count_ = 0;
+    uint32_t actual_audio_sample_rate_ = 44100;
     
     // Framerate detection
     uint64_t first_video_pts_ = 0;
