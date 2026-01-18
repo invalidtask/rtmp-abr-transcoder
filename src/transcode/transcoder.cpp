@@ -6,6 +6,12 @@
 
 namespace transcode {
 
+// AVC decoder config fallback values
+constexpr uint8_t AVC_FALLBACK_PROFILE = 0x42;  // Baseline profile
+constexpr uint8_t AVC_FALLBACK_PROFILE_COMPAT = 0x00;
+constexpr uint8_t AVC_FALLBACK_LEVEL = 0x1E;  // Level 3.0
+
+
 Transcoder::Transcoder(EpollLoop& loop)
     : loop_(loop),
       video_decoder_(std::make_unique<H264Decoder>()),
@@ -548,6 +554,7 @@ void Transcoder::on_publish_ready(Output* output) {
             msg.payload = build_avc_decoder_config(sps, pps);
             
             output->pusher->send_message(msg);
+            output->pusher->flush();
             Logger::info("Sent AVC sequence header for ", output->config.name);
         }
     }
@@ -564,6 +571,7 @@ void Transcoder::on_publish_ready(Output* output) {
             msg.payload = build_aac_sequence_header(asc);
             
             output->pusher->send_message(msg);
+            output->pusher->flush();
             Logger::info("Sent AAC sequence header for ", output->config.name);
         }
     }
@@ -677,9 +685,9 @@ std::vector<uint8_t> Transcoder::build_avc_decoder_config(const std::vector<uint
         flv_data.push_back(sps[3]);  // AVCLevelIndication
     } else {
         // Fallback values if SPS is too small
-        flv_data.push_back(0x42);  // Baseline profile
-        flv_data.push_back(0x00);
-        flv_data.push_back(0x1E);  // Level 3.0
+        flv_data.push_back(AVC_FALLBACK_PROFILE);
+        flv_data.push_back(AVC_FALLBACK_PROFILE_COMPAT);
+        flv_data.push_back(AVC_FALLBACK_LEVEL);
     }
     
     // Byte 4: lengthSizeMinusOne (0xFF indicates 4-byte NALU length)
@@ -715,6 +723,8 @@ std::vector<uint8_t> Transcoder::build_aac_sequence_header(const std::vector<uin
     
     // Byte 0: sound format (10=AAC) + rate (3=44kHz) + size (1=16-bit) + type (1=stereo)
     // 0xAF = 10101111 = AAC + 44kHz + 16-bit + stereo
+    // Note: The actual audio parameters are in the AudioSpecificConfig; this byte is informational
+    // and matches the format used in build_flv_audio_packet for consistency
     flv_data.push_back(0xAF);
     
     // Byte 1: AAC packet type (0=sequence header)
