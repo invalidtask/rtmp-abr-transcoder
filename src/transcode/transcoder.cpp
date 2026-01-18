@@ -11,6 +11,15 @@ constexpr uint8_t AVC_FALLBACK_PROFILE = 0x42;  // Baseline profile
 constexpr uint8_t AVC_FALLBACK_PROFILE_COMPAT = 0x00;
 constexpr uint8_t AVC_FALLBACK_LEVEL = 0x1E;  // Level 3.0
 
+// Framerate detection constants
+constexpr uint64_t FPS_DETECTION_MIN_FRAMES = 30;  // Minimum frames before detecting FPS
+constexpr uint64_t FPS_DETECTION_MAX_FRAMES = 60;  // Maximum frames to use for FPS detection
+constexpr int MIN_VALID_FPS = 10;  // Minimum valid framerate
+constexpr int MAX_VALID_FPS = 60;  // Maximum valid framerate
+
+// AAC encoding constants
+constexpr int AAC_SAMPLES_PER_FRAME = 1024;  // AAC typically uses 1024 samples per frame
+
 
 Transcoder::Transcoder(EpollLoop& loop)
     : loop_(loop),
@@ -207,15 +216,15 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
             last_video_pts_ = frame.timestamp;
             
             // Detect fps after receiving ~30-60 frames
-            if (video_frame_count_ >= 30 && video_frame_count_ <= 60) {
+            if (video_frame_count_ >= FPS_DETECTION_MIN_FRAMES && video_frame_count_ <= FPS_DETECTION_MAX_FRAMES) {
                 uint64_t time_diff = last_video_pts_ - first_video_pts_;
                 if (time_diff > 0) {
                     // Calculate fps: fps = (frame_count - 1) * 1000 / time_diff_ms
                     // (frame_count - 1 because we're measuring intervals between frames)
                     int calculated_fps = static_cast<int>(((video_frame_count_ - 1) * 1000 + time_diff / 2) / time_diff);
                     
-                    // Cap between reasonable values (10-60 fps)
-                    if (calculated_fps >= 10 && calculated_fps <= 60) {
+                    // Cap between reasonable values
+                    if (calculated_fps >= MIN_VALID_FPS && calculated_fps <= MAX_VALID_FPS) {
                         detected_fps_ = calculated_fps;
                         fps_detected_ = true;
                         Logger::info("Detected source framerate: ", detected_fps_, " fps (calculated from ", 
@@ -321,9 +330,9 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
             // Increment timestamp for next frame (after processing all packets)
             // AAC typically uses 1024 samples per frame
             // Use floating-point calculation to avoid precision loss
-            int aac_frame_duration_ms = static_cast<int>((1024.0 * 1000.0 / frame.sample_rate) + 0.5);
+            int aac_frame_duration_ms = static_cast<int>((AAC_SAMPLES_PER_FRAME * 1000.0 / frame.sample_rate) + 0.5);
             output_audio_timestamp_ += aac_frame_duration_ms;
-            audio_sample_count_ += 1024;
+            audio_sample_count_ += AAC_SAMPLES_PER_FRAME;
         }
     }
 }
