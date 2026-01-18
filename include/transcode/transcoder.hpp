@@ -78,6 +78,18 @@ private:
     
     bool audio_initialized_ = false;
     int nalu_length_size_ = 4;
+    
+    // Timestamp tracking for synchronized output
+    uint32_t output_video_timestamp_ = 0;
+    uint32_t output_audio_timestamp_ = 0;
+    uint64_t video_frame_count_ = 0;
+    uint64_t audio_sample_count_ = 0;
+    
+    // Framerate detection
+    uint64_t first_video_pts_ = 0;
+    uint64_t last_video_pts_ = 0;
+    int detected_fps_ = 0;
+    bool fps_detected_ = false;
 };
 
 }

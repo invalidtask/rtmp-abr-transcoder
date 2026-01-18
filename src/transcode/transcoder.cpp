@@ -195,6 +195,36 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
         Logger::info("Detected source resolution: ", source_width_, "x", source_height_);
     }
     
+    // Framerate detection - track timestamps to calculate actual fps
+    if (!fps_detected_) {
+        if (video_frame_count_ == 0) {
+            first_video_pts_ = frame.timestamp;
+            last_video_pts_ = frame.timestamp;
+        } else {
+            last_video_pts_ = frame.timestamp;
+            
+            // Detect fps after receiving ~30-60 frames
+            if (video_frame_count_ >= 30 && video_frame_count_ <= 60) {
+                uint64_t time_diff = last_video_pts_ - first_video_pts_;
+                if (time_diff > 0) {
+                    // Calculate fps: fps = frame_count * 1000 / time_diff_ms
+                    int calculated_fps = static_cast<int>((video_frame_count_ * 1000 + time_diff / 2) / time_diff);
+                    
+                    // Cap between reasonable values (10-60 fps)
+                    if (calculated_fps >= 10 && calculated_fps <= 60) {
+                        detected_fps_ = calculated_fps;
+                        fps_detected_ = true;
+                        Logger::info("Detected source framerate: ", detected_fps_, " fps (calculated from ", 
+                                   video_frame_count_, " frames over ", time_diff, " ms)");
+                    }
+                }
+            }
+        }
+    }
+    
+    // Use detected fps if available, otherwise fall back to configured fps
+    int effective_fps = fps_detected_ ? detected_fps_ : source_fps_;
+    
     Logger::debug("Processing video frame: ", frame.width, "x", frame.height);
     
     for (auto& output : outputs_) {
@@ -204,8 +234,8 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
             enc_config.width = output->config.width;
             enc_config.height = output->config.height;
             enc_config.bitrate_kbps = output->config.video_bitrate_kbps;
-            enc_config.fps = source_fps_;
-            enc_config.gop_size = source_fps_ * 2;  // 2 second GOP
+            enc_config.fps = effective_fps;
+            enc_config.gop_size = effective_fps * 2;  // 2 second GOP
             enc_config.preset = "fast";
             
             if (!output->video_encoder->initialize(enc_config)) {
@@ -223,7 +253,7 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
             Logger::info("Scaler initialized: ", frame.width, "x", frame.height, 
                         " -> ", output->config.width, "x", output->config.height);
             Logger::info("H264 encoder initialized: ", output->config.width, "x", output->config.height,
-                        " @ ", output->config.video_bitrate_kbps, "kbps");
+                        " @ ", output->config.video_bitrate_kbps, "kbps, ", effective_fps, " fps");
             
             output->video_initialized = true;
         }
@@ -242,13 +272,25 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
             continue;
         }
         
-        // Push each encoded packet
+        // Calculate frame duration in milliseconds
+        int frame_duration_ms = 1000 / effective_fps;
+        
+        // Push each encoded packet with calculated timestamp
         for (auto& packet : packets) {
+            // Override packet timestamp with calculated output timestamp
+            packet.timestamp = output_video_timestamp_;
+            
             Logger::debug("Encoded ", output->config.name, ": ", packet.data.size(), 
-                         " bytes, keyframe=", packet.keyframe);
+                         " bytes, keyframe=", packet.keyframe, ", timestamp=", packet.timestamp);
             push_video_packet(*output, packet);
+            
+            // Increment timestamp for next frame
+            output_video_timestamp_ += frame_duration_ms;
         }
     }
+    
+    // Increment frame count for fps detection and tracking
+    video_frame_count_++;
 }
 
 void Transcoder::process_audio_frame(const AudioFrame& frame) {
@@ -269,8 +311,19 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
         // Encode
         std::vector<EncodedPacket> packets;
         if (output->audio_encoder->encode(frame, packets)) {
+            // AAC typically uses 1024 samples per frame
+            // Calculate timestamp increment: (1024 * 1000) / sample_rate
+            int aac_frame_duration_ms = (1024 * 1000) / frame.sample_rate;
+            
             for (auto& packet : packets) {
+                // Override packet timestamp with calculated output timestamp
+                packet.timestamp = output_audio_timestamp_;
+                
                 push_audio_packet(*output, packet);
+                
+                // Increment timestamp for next frame
+                output_audio_timestamp_ += aac_frame_duration_ms;
+                audio_sample_count_ += 1024;
             }
         }
     }
@@ -536,6 +589,10 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
 
 void Transcoder::on_publish_ready(Output* output) {
     output->publishing = true;
+    
+    // Reset timestamps to start from 0 when beginning to publish
+    output_video_timestamp_ = 0;
+    output_audio_timestamp_ = 0;
     
     Logger::info("Output ", output->config.name, " ready, flushing ", 
                  output->pending_video.size(), " video + ", 
