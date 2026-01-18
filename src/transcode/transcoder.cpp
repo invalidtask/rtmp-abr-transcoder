@@ -535,6 +535,39 @@ void Transcoder::on_publish_ready(Output* output) {
                  output->pending_video.size(), " video + ", 
                  output->pending_audio.size(), " audio buffered packets");
     
+    // Send AVC sequence header if video encoder is initialized
+    if (output->video_initialized) {
+        auto sps = output->video_encoder->get_sps();
+        auto pps = output->video_encoder->get_pps();
+        
+        if (!sps.empty() && !pps.empty()) {
+            rtmp::Message msg;
+            msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
+            msg.timestamp = 0;
+            msg.stream_id = output->stream_id;
+            msg.payload = build_avc_decoder_config(sps, pps);
+            
+            output->pusher->send_message(msg);
+            Logger::info("Sent AVC sequence header for ", output->config.name);
+        }
+    }
+    
+    // Send AAC sequence header if audio encoder is initialized
+    if (output->audio_initialized) {
+        auto asc = output->audio_encoder->get_audio_specific_config();
+        
+        if (!asc.empty()) {
+            rtmp::Message msg;
+            msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
+            msg.timestamp = 0;
+            msg.stream_id = output->stream_id;
+            msg.payload = build_aac_sequence_header(asc);
+            
+            output->pusher->send_message(msg);
+            Logger::info("Sent AAC sequence header for ", output->config.name);
+        }
+    }
+    
     // Flush pending video packets
     for (auto& packet : output->pending_video) {
         rtmp::Message msg;
@@ -616,6 +649,81 @@ void Transcoder::parse_avc_decoder_config(const uint8_t* data, size_t size) {
     }
     
     Logger::info("Parsed AVC decoder config, NALU length size: ", nalu_length_size_);
+}
+
+std::vector<uint8_t> Transcoder::build_avc_decoder_config(const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps) {
+    std::vector<uint8_t> flv_data;
+    
+    // Byte 0: frame type (1=keyframe) + codec id (7=AVC)
+    flv_data.push_back(0x17);
+    
+    // Byte 1: AVC packet type (0=sequence header)
+    flv_data.push_back(0x00);
+    
+    // Bytes 2-4: composition time (0 for sequence header)
+    flv_data.push_back(0x00);
+    flv_data.push_back(0x00);
+    flv_data.push_back(0x00);
+    
+    // Build AVCDecoderConfigurationRecord per ISO/IEC 14496-15
+    // Byte 0: configurationVersion = 1
+    flv_data.push_back(0x01);
+    
+    // Bytes 1-3: AVCProfileIndication, profile_compatibility, AVCLevelIndication
+    // Extract from SPS bytes 1-3
+    if (sps.size() >= 4) {
+        flv_data.push_back(sps[1]);  // AVCProfileIndication
+        flv_data.push_back(sps[2]);  // profile_compatibility
+        flv_data.push_back(sps[3]);  // AVCLevelIndication
+    } else {
+        // Fallback values if SPS is too small
+        flv_data.push_back(0x42);  // Baseline profile
+        flv_data.push_back(0x00);
+        flv_data.push_back(0x1E);  // Level 3.0
+    }
+    
+    // Byte 4: lengthSizeMinusOne (0xFF indicates 4-byte NALU length)
+    flv_data.push_back(0xFF);
+    
+    // Byte 5: numOfSequenceParameterSets (0xE1 = 1 SPS)
+    flv_data.push_back(0xE1);
+    
+    // Bytes 6-7: sequenceParameterSetLength (16-bit big-endian)
+    uint16_t sps_len = sps.size();
+    flv_data.push_back((sps_len >> 8) & 0xFF);
+    flv_data.push_back(sps_len & 0xFF);
+    
+    // Append SPS data
+    flv_data.insert(flv_data.end(), sps.begin(), sps.end());
+    
+    // Byte N: numOfPictureParameterSets (1 PPS)
+    flv_data.push_back(0x01);
+    
+    // Bytes N+1, N+2: pictureParameterSetLength (16-bit big-endian)
+    uint16_t pps_len = pps.size();
+    flv_data.push_back((pps_len >> 8) & 0xFF);
+    flv_data.push_back(pps_len & 0xFF);
+    
+    // Append PPS data
+    flv_data.insert(flv_data.end(), pps.begin(), pps.end());
+    
+    return flv_data;
+}
+
+std::vector<uint8_t> Transcoder::build_aac_sequence_header(const std::vector<uint8_t>& asc) {
+    std::vector<uint8_t> flv_data;
+    
+    // Byte 0: sound format (10=AAC) + rate (3=44kHz) + size (1=16-bit) + type (1=stereo)
+    // 0xAF = 10101111 = AAC + 44kHz + 16-bit + stereo
+    flv_data.push_back(0xAF);
+    
+    // Byte 1: AAC packet type (0=sequence header)
+    flv_data.push_back(0x00);
+    
+    // Append AudioSpecificConfig
+    flv_data.insert(flv_data.end(), asc.begin(), asc.end());
+    
+    return flv_data;
 }
 
 }
