@@ -80,18 +80,16 @@ private:
     bool audio_initialized_ = false;
     int nalu_length_size_ = 4;
     
-    // Timestamp tracking for synchronized output
-    uint32_t output_video_timestamp_ = 0;
-    uint32_t output_audio_timestamp_ = 0;
-    uint64_t video_frame_count_ = 0;
-    uint64_t audio_sample_count_ = 0;
-    uint32_t actual_audio_sample_rate_ = 44100;
+    // Timestamp passthrough - track base timestamps from input stream
+    uint32_t base_video_timestamp_ = 0;
+    uint32_t base_audio_timestamp_ = 0;
+    bool base_video_timestamp_set_ = false;
+    bool base_audio_timestamp_set_ = false;
+    bool publishing_started_ = false;
     
-    // Framerate detection
-    uint64_t first_video_pts_ = 0;
-    uint64_t last_video_pts_ = 0;
-    int detected_fps_ = 0;
-    bool fps_detected_ = false;
+    // Frame count for statistics only (not used for timestamp calculation)
+    uint64_t video_frame_count_ = 0;
+    uint32_t actual_audio_sample_rate_ = 44100;
 };
 
 }
