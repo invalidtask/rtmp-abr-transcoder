@@ -80,11 +80,9 @@ private:
     bool audio_initialized_ = false;
     int nalu_length_size_ = 4;
     
-    // Timestamp passthrough - track base timestamps from input stream
-    uint32_t base_video_timestamp_ = 0;
-    uint32_t base_audio_timestamp_ = 0;
-    bool base_video_timestamp_set_ = false;
-    bool base_audio_timestamp_set_ = false;
+    // Timestamp passthrough - single shared base timestamp for A/V sync
+    uint32_t base_timestamp_ = 0;  // Single shared base for A/V sync
+    bool base_timestamp_set_ = false;
     bool publishing_started_ = false;
     
     // Frame count for statistics only (not used for timestamp calculation)
