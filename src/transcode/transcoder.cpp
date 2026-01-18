@@ -297,13 +297,17 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
     }
     
     // Increment timestamp for next frame (after processing all packets)
-    // Use floating-point calculation to avoid precision loss
-    int frame_duration_ms = static_cast<int>((1000.0 / effective_fps) + 0.5);
-    output_video_timestamp_ += frame_duration_ms;
+    // Use frame-count-based calculation to avoid floating-point accumulation errors
+    output_video_timestamp_ = static_cast<uint32_t>((video_frame_count_ * 1000) / effective_fps);
 }
 
 void Transcoder::process_audio_frame(const AudioFrame& frame) {
     Logger::debug("Processing audio frame: ", frame.sample_rate, "Hz, ", frame.channels, " ch");
+    
+    // Track actual audio sample rate for accurate FLV packet building
+    if (actual_audio_sample_rate_ != static_cast<uint32_t>(frame.sample_rate)) {
+        actual_audio_sample_rate_ = frame.sample_rate;
+    }
     
     for (auto& output : outputs_) {
         // Initialize audio encoder on first frame
@@ -327,12 +331,12 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
                 push_audio_packet(*output, packet);
             }
             
-            // Increment timestamp for next frame (after processing all packets)
-            // AAC typically uses 1024 samples per frame
-            // Use floating-point calculation to avoid precision loss
-            int aac_frame_duration_ms = static_cast<int>((AAC_SAMPLES_PER_FRAME * 1000.0 / frame.sample_rate) + 0.5);
-            output_audio_timestamp_ += aac_frame_duration_ms;
-            audio_sample_count_ += AAC_SAMPLES_PER_FRAME;
+            // Increment timestamp based on actual samples encoded
+            // Calculate samples per channel from interleaved samples
+            uint64_t samples_per_channel = frame.samples.size() / frame.channels;
+            audio_sample_count_ += samples_per_channel;
+            // Calculate timestamp from total sample count for precision
+            output_audio_timestamp_ = static_cast<uint32_t>((audio_sample_count_ * 1000) / frame.sample_rate);
         }
     }
 }
@@ -414,7 +418,19 @@ std::vector<uint8_t> Transcoder::build_flv_audio_packet(const EncodedPacket& pac
     
     // Byte 0: sound format + rate + size + type
     uint8_t sound_format = 0xA0;  // AAC
-    uint8_t sound_rate = 0x03;    // 44kHz
+    
+    // Map actual sample rate to FLV sound rate field
+    uint8_t sound_rate;
+    if (actual_audio_sample_rate_ >= 44100) {
+        sound_rate = 0x03;  // 44kHz
+    } else if (actual_audio_sample_rate_ >= 22050) {
+        sound_rate = 0x02;  // 22kHz
+    } else if (actual_audio_sample_rate_ >= 11025) {
+        sound_rate = 0x01;  // 11kHz
+    } else {
+        sound_rate = 0x00;  // 5.5kHz
+    }
+    
     uint8_t sound_size = 0x01;    // 16-bit
     uint8_t sound_type = 0x01;    // Stereo
     flv_data.push_back(sound_format | (sound_rate << 2) | (sound_size << 1) | sound_type);
@@ -799,11 +815,26 @@ std::vector<uint8_t> Transcoder::build_avc_decoder_config(const std::vector<uint
 std::vector<uint8_t> Transcoder::build_aac_sequence_header(const std::vector<uint8_t>& asc) {
     std::vector<uint8_t> flv_data;
     
-    // Byte 0: sound format (10=AAC) + rate (3=44kHz) + size (1=16-bit) + type (1=stereo)
+    // Byte 0: sound format (10=AAC) + rate + size + type
+    // Map actual sample rate to FLV sound rate field
+    uint8_t sound_rate;
+    if (actual_audio_sample_rate_ >= 44100) {
+        sound_rate = 0x03;  // 44kHz
+    } else if (actual_audio_sample_rate_ >= 22050) {
+        sound_rate = 0x02;  // 22kHz
+    } else if (actual_audio_sample_rate_ >= 11025) {
+        sound_rate = 0x01;  // 11kHz
+    } else {
+        sound_rate = 0x00;  // 5.5kHz
+    }
+    
     // 0xAF = 10101111 = AAC + 44kHz + 16-bit + stereo
     // Note: The actual audio parameters are in the AudioSpecificConfig; this byte is informational
     // and matches the format used in build_flv_audio_packet for consistency
-    flv_data.push_back(0xAF);
+    uint8_t sound_format = 0xA0;  // AAC
+    uint8_t sound_size = 0x01;    // 16-bit
+    uint8_t sound_type = 0x01;    // Stereo
+    flv_data.push_back(sound_format | (sound_rate << 2) | (sound_size << 1) | sound_type);
     
     // Byte 1: AAC packet type (0=sequence header)
     flv_data.push_back(0x00);

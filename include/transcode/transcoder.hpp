@@ -84,6 +84,7 @@ private:
     uint32_t output_audio_timestamp_ = 0;
     uint64_t video_frame_count_ = 0;
     uint64_t audio_sample_count_ = 0;
+    uint32_t actual_audio_sample_rate_ = 44100;
     
     // Framerate detection
     uint64_t first_video_pts_ = 0;
