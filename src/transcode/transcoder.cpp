@@ -299,7 +299,7 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
     // Increment timestamp for next frame (after processing all packets)
     // Use frame-count-based calculation to avoid floating-point accumulation errors
     if (effective_fps > 0) {
-        output_video_timestamp_ = static_cast<uint32_t>((video_frame_count_ * 1000) / effective_fps);
+        output_video_timestamp_ = static_cast<uint32_t>((static_cast<uint64_t>(video_frame_count_) * 1000) / effective_fps);
     }
 }
 
@@ -339,7 +339,7 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
                 uint64_t samples_per_channel = frame.samples.size() / frame.channels;
                 audio_sample_count_ += samples_per_channel;
                 // Calculate timestamp from total sample count for precision
-                output_audio_timestamp_ = static_cast<uint32_t>((audio_sample_count_ * 1000) / frame.sample_rate);
+                output_audio_timestamp_ = static_cast<uint32_t>((static_cast<uint64_t>(audio_sample_count_) * 1000) / frame.sample_rate);
             }
         }
     }
