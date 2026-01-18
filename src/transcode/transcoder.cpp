@@ -235,14 +235,19 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
         }
     }
     
-    // Use detected fps if available, otherwise fall back to configured fps
-    int effective_fps = fps_detected_ ? detected_fps_ : source_fps_;
-    
     Logger::debug("Processing video frame: ", frame.width, "x", frame.height);
     
+    // Wait for FPS detection before initializing encoders for better accuracy
+    // Use detected fps if available, otherwise fall back to configured source fps
+    int effective_fps = fps_detected_ ? detected_fps_ : source_fps_;
+    
+    // Skip encoder initialization until FPS is detected (unless we're past FPS_DETECTION_MAX_FRAMES timeout)
+    // This ensures encoders use the correct detected framerate instead of the configured value
+    bool can_initialize_encoder = fps_detected_ || (video_frame_count_ > FPS_DETECTION_MAX_FRAMES);
+    
     for (auto& output : outputs_) {
-        // Initialize encoders on first frame
-        if (!output->video_initialized) {
+        // Initialize encoders only after FPS detection or timeout
+        if (!output->video_initialized && can_initialize_encoder) {
             EncoderConfig enc_config;
             enc_config.width = output->config.width;
             enc_config.height = output->config.height;
@@ -269,6 +274,14 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
                         " @ ", output->config.video_bitrate_kbps, "kbps, ", effective_fps, " fps");
             
             output->video_initialized = true;
+        }
+        
+        // Skip processing if encoder not yet initialized (waiting for FPS detection)
+        // Frames during this period (typically 30-60 frames or 1-2 seconds) are decoded
+        // for FPS detection but not encoded/sent to output streams
+        if (!output->video_initialized) {
+            Logger::debug("Skipping frame for ", output->config.name, " - waiting for FPS detection");
+            continue;
         }
         
         // Scale the frame
@@ -620,12 +633,25 @@ void Transcoder::on_publish_ready(Output* output) {
     if (!any_already_publishing) {
         output_video_timestamp_ = 0;
         output_audio_timestamp_ = 0;
-        Logger::info("First output ready - resetting timestamps to 0");
+        video_frame_count_ = 0;
+        audio_sample_count_ = 0;
+        Logger::info("First output ready - resetting timestamps and counters to 0");
     }
     
-    Logger::info("Output ", output->config.name, " ready, flushing ", 
-                 output->pending_video.size(), " video + ", 
-                 output->pending_audio.size(), " audio buffered packets");
+    // Discard pending packets when resetting timestamps to avoid stale timestamp issues
+    // Pending packets were buffered before connection was ready, so discarding them
+    // ensures clean timestamp synchronization from the start of streaming
+    if (!any_already_publishing) {
+        Logger::info("Output ", output->config.name, " ready, discarding ", 
+                     output->pending_video.size(), " video + ", 
+                     output->pending_audio.size(), " audio buffered packets (stale timestamps)");
+        output->pending_video.clear();
+        output->pending_audio.clear();
+    } else {
+        Logger::info("Output ", output->config.name, " ready, flushing ", 
+                     output->pending_video.size(), " video + ", 
+                     output->pending_audio.size(), " audio buffered packets");
+    }
     
     // Send AVC sequence header if video encoder is initialized
     if (output->video_initialized) {
@@ -662,29 +688,32 @@ void Transcoder::on_publish_ready(Output* output) {
         }
     }
     
-    // Flush pending video packets
-    for (auto& packet : output->pending_video) {
-        rtmp::Message msg;
-        msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
-        msg.timestamp = packet.timestamp;
-        msg.stream_id = output->stream_id;
-        msg.payload = build_flv_video_packet(packet);
+    // Only flush pending packets if not discarded above
+    if (any_already_publishing) {
+        // Flush pending video packets
+        for (auto& packet : output->pending_video) {
+            rtmp::Message msg;
+            msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Video);
+            msg.timestamp = packet.timestamp;
+            msg.stream_id = output->stream_id;
+            msg.payload = build_flv_video_packet(packet);
+            
+            output->pusher->send_message(msg);
+        }
+        output->pending_video.clear();
         
-        output->pusher->send_message(msg);
+        // Flush pending audio packets
+        for (auto& packet : output->pending_audio) {
+            rtmp::Message msg;
+            msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
+            msg.timestamp = packet.timestamp;
+            msg.stream_id = output->stream_id;
+            msg.payload = build_flv_audio_packet(packet);
+            
+            output->pusher->send_message(msg);
+        }
+        output->pending_audio.clear();
     }
-    output->pending_video.clear();
-    
-    // Flush pending audio packets
-    for (auto& packet : output->pending_audio) {
-        rtmp::Message msg;
-        msg.type_id = static_cast<uint8_t>(rtmp::MessageType::Audio);
-        msg.timestamp = packet.timestamp;
-        msg.stream_id = output->stream_id;
-        msg.payload = build_flv_audio_packet(packet);
-        
-        output->pusher->send_message(msg);
-    }
-    output->pending_audio.clear();
 }
 
 void Transcoder::parse_avc_decoder_config(const uint8_t* data, size_t size) {
