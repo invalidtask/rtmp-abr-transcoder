@@ -203,6 +203,8 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
     video_frame_count_++;
     
     // Set base timestamp on first keyframe after publishing starts
+    // We wait for a keyframe to ensure clean playback start
+    // This drops frames for all outputs until we get the first keyframe
     if (publishing_started_ && !base_video_timestamp_set_) {
         if (frame.keyframe) {
             base_video_timestamp_ = frame.timestamp;
@@ -597,7 +599,9 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
 void Transcoder::on_publish_ready(Output* output) {
     output->publishing = true;
     
-    // Set flag to start using passthrough timestamps
+    // Set flag to start using passthrough timestamps on first output
+    // Once set, this flag stays true to maintain consistent timestamps across all outputs
+    // Base timestamps are reset via base_video_timestamp_set_ / base_audio_timestamp_set_ flags
     if (!publishing_started_) {
         publishing_started_ = true;
         base_video_timestamp_set_ = false;  // Will be set on next keyframe
