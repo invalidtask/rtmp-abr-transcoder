@@ -238,11 +238,11 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
     Logger::debug("Processing video frame: ", frame.width, "x", frame.height);
     
     // Wait for FPS detection before initializing encoders for better accuracy
-    // Use detected fps if available, otherwise fall back to configured fps
+    // Use detected fps if available, otherwise fall back to configured source fps
     int effective_fps = fps_detected_ ? detected_fps_ : source_fps_;
     
     // Skip encoder initialization until FPS is detected (unless we're past FPS_DETECTION_MAX_FRAMES timeout)
-    // This ensures encoders use the correct detected framerate instead of the default
+    // This ensures encoders use the correct detected framerate instead of the configured value
     bool can_initialize_encoder = fps_detected_ || (video_frame_count_ > FPS_DETECTION_MAX_FRAMES);
     
     for (auto& output : outputs_) {
