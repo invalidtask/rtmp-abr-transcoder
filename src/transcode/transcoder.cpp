@@ -241,7 +241,8 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
     // Use detected fps if available, otherwise fall back to configured fps
     int effective_fps = fps_detected_ ? detected_fps_ : source_fps_;
     
-    // Skip encoder initialization until FPS is detected (unless we're past detection window)
+    // Skip encoder initialization until FPS is detected (unless we're past FPS_DETECTION_MAX_FRAMES timeout)
+    // This ensures encoders use the correct detected framerate instead of the default
     bool can_initialize_encoder = fps_detected_ || (video_frame_count_ > FPS_DETECTION_MAX_FRAMES);
     
     for (auto& output : outputs_) {
@@ -276,6 +277,8 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
         }
         
         // Skip processing if encoder not yet initialized (waiting for FPS detection)
+        // Frames during this period (typically 30-60 frames or 1-2 seconds) are decoded
+        // for FPS detection but not encoded/sent to output streams
         if (!output->video_initialized) {
             Logger::debug("Skipping frame for ", output->config.name, " - waiting for FPS detection");
             continue;
