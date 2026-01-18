@@ -202,34 +202,33 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
     // Increment frame count for statistics
     video_frame_count_++;
     
+    // If not publishing yet, drop frame
+    if (!publishing_started_) {
+        return;
+    }
+    
     // Set base timestamp on first keyframe after publishing starts
     // We wait for a keyframe to ensure clean playback start
     // This drops frames for all outputs until we get the first keyframe
-    if (publishing_started_ && !base_video_timestamp_set_) {
+    if (!base_timestamp_set_) {
         if (frame.keyframe) {
-            base_video_timestamp_ = frame.timestamp;
-            base_video_timestamp_set_ = true;
-            Logger::info("Video base timestamp set to ", base_video_timestamp_, " on keyframe");
+            base_timestamp_ = frame.timestamp;
+            base_timestamp_set_ = true;
+            Logger::info("Base timestamp set to ", base_timestamp_, " (from video keyframe)");
         } else {
-            Logger::debug("Waiting for keyframe to set base video timestamp");
+            Logger::debug("Waiting for keyframe to set base timestamp");
             return;  // Drop non-keyframes until we get a keyframe
         }
-    }
-    
-    // Drop frames if base timestamp not yet set
-    if (!base_video_timestamp_set_) {
-        Logger::debug("Dropping video frame - base timestamp not set");
-        return;
     }
     
     // Calculate output timestamp using passthrough from input
     // Protect against underflow in case of out-of-order frames
     uint32_t output_ts = 0;
-    if (frame.timestamp >= base_video_timestamp_) {
-        output_ts = frame.timestamp - base_video_timestamp_;
+    if (frame.timestamp >= base_timestamp_) {
+        output_ts = frame.timestamp - base_timestamp_;
     } else {
         Logger::warn("Video timestamp ", frame.timestamp, " is less than base ", 
-                     base_video_timestamp_, " - using 0");
+                     base_timestamp_, " - using 0");
     }
     
     Logger::debug("Processing video frame: ", frame.width, "x", frame.height, 
@@ -300,27 +299,25 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
         actual_audio_sample_rate_ = frame.sample_rate;
     }
     
-    // Set base timestamp on first audio frame after publishing starts
-    if (publishing_started_ && !base_audio_timestamp_set_) {
-        base_audio_timestamp_ = frame.timestamp;
-        base_audio_timestamp_set_ = true;
-        Logger::info("Audio base timestamp set to ", base_audio_timestamp_);
-    }
-    
-    // Drop frames if base timestamp not yet set
-    if (!base_audio_timestamp_set_) {
-        Logger::debug("Dropping audio frame - base timestamp not set");
+    // If not publishing yet, drop frame
+    if (!publishing_started_) {
         return;
     }
     
-    // Calculate output timestamp using passthrough from input
+    // If base timestamp not set yet (waiting for video keyframe), drop audio
+    if (!base_timestamp_set_) {
+        Logger::debug("Dropping audio frame - base timestamp not set (waiting for video keyframe)");
+        return;
+    }
+    
+    // Calculate output timestamp using SAME shared base timestamp
     // Protect against underflow in case of out-of-order frames
     uint32_t output_ts = 0;
-    if (frame.timestamp >= base_audio_timestamp_) {
-        output_ts = frame.timestamp - base_audio_timestamp_;
+    if (frame.timestamp >= base_timestamp_) {
+        output_ts = frame.timestamp - base_timestamp_;
     } else {
         Logger::warn("Audio timestamp ", frame.timestamp, " is less than base ", 
-                     base_audio_timestamp_, " - using 0");
+                     base_timestamp_, " - using 0");
     }
     
     for (auto& output : outputs_) {
@@ -601,12 +598,11 @@ void Transcoder::on_publish_ready(Output* output) {
     
     // Set flag to start using passthrough timestamps on first output
     // Once set, this flag stays true to maintain consistent timestamps across all outputs
-    // Base timestamps are reset via base_video_timestamp_set_ / base_audio_timestamp_set_ flags
+    // Base timestamp is reset via base_timestamp_set_ flag
     if (!publishing_started_) {
         publishing_started_ = true;
-        base_video_timestamp_set_ = false;  // Will be set on next keyframe
-        base_audio_timestamp_set_ = false;  // Will be set on next audio frame
-        Logger::info("Publishing started, will set base timestamps on next frames");
+        base_timestamp_set_ = false;  // Will be set on first video keyframe
+        Logger::info("Publishing started, waiting for keyframe to set base timestamp");
     }
     
     // Clear pending packets - they have pre-publishing timestamps
