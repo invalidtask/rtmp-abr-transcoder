@@ -589,9 +589,22 @@ void Transcoder::setup_pusher_callbacks(Output* output) {
 void Transcoder::on_publish_ready(Output* output) {
     output->publishing = true;
     
-    // Reset timestamps to start from 0 when beginning to publish
-    output_video_timestamp_ = 0;
-    output_audio_timestamp_ = 0;
+    // Reset timestamps to start from 0 when first output begins publishing
+    // Check if any other output is already publishing
+    bool any_already_publishing = false;
+    for (const auto& out : outputs_) {
+        if (out.get() != output && out->publishing) {
+            any_already_publishing = true;
+            break;
+        }
+    }
+    
+    // Only reset timestamps if this is the first output to start publishing
+    if (!any_already_publishing) {
+        output_video_timestamp_ = 0;
+        output_audio_timestamp_ = 0;
+        Logger::info("First output ready - resetting timestamps to 0");
+    }
     
     Logger::info("Output ", output->config.name, " ready, flushing ", 
                  output->pending_video.size(), " video + ", 
