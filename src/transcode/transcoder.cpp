@@ -195,9 +195,12 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
         Logger::info("Detected source resolution: ", source_width_, "x", source_height_);
     }
     
+    // Increment frame count for fps detection and tracking
+    video_frame_count_++;
+    
     // Framerate detection - track timestamps to calculate actual fps
     if (!fps_detected_) {
-        if (video_frame_count_ == 0) {
+        if (video_frame_count_ == 1) {
             first_video_pts_ = frame.timestamp;
             last_video_pts_ = frame.timestamp;
         } else {
@@ -207,8 +210,9 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
             if (video_frame_count_ >= 30 && video_frame_count_ <= 60) {
                 uint64_t time_diff = last_video_pts_ - first_video_pts_;
                 if (time_diff > 0) {
-                    // Calculate fps: fps = frame_count * 1000 / time_diff_ms
-                    int calculated_fps = static_cast<int>((video_frame_count_ * 1000 + time_diff / 2) / time_diff);
+                    // Calculate fps: fps = (frame_count - 1) * 1000 / time_diff_ms
+                    // (frame_count - 1 because we're measuring intervals between frames)
+                    int calculated_fps = static_cast<int>(((video_frame_count_ - 1) * 1000 + time_diff / 2) / time_diff);
                     
                     // Cap between reasonable values (10-60 fps)
                     if (calculated_fps >= 10 && calculated_fps <= 60) {
@@ -272,9 +276,6 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
             continue;
         }
         
-        // Calculate frame duration in milliseconds
-        int frame_duration_ms = 1000 / effective_fps;
-        
         // Push each encoded packet with calculated timestamp
         for (auto& packet : packets) {
             // Override packet timestamp with calculated output timestamp
@@ -283,14 +284,13 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
             Logger::debug("Encoded ", output->config.name, ": ", packet.data.size(), 
                          " bytes, keyframe=", packet.keyframe, ", timestamp=", packet.timestamp);
             push_video_packet(*output, packet);
-            
-            // Increment timestamp for next frame
-            output_video_timestamp_ += frame_duration_ms;
         }
     }
     
-    // Increment frame count for fps detection and tracking
-    video_frame_count_++;
+    // Increment timestamp for next frame (after processing all packets)
+    // Use floating-point calculation to avoid precision loss
+    int frame_duration_ms = static_cast<int>((1000.0 / effective_fps) + 0.5);
+    output_video_timestamp_ += frame_duration_ms;
 }
 
 void Transcoder::process_audio_frame(const AudioFrame& frame) {
@@ -311,20 +311,19 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
         // Encode
         std::vector<EncodedPacket> packets;
         if (output->audio_encoder->encode(frame, packets)) {
-            // AAC typically uses 1024 samples per frame
-            // Calculate timestamp increment: (1024 * 1000) / sample_rate
-            int aac_frame_duration_ms = (1024 * 1000) / frame.sample_rate;
-            
             for (auto& packet : packets) {
                 // Override packet timestamp with calculated output timestamp
                 packet.timestamp = output_audio_timestamp_;
                 
                 push_audio_packet(*output, packet);
-                
-                // Increment timestamp for next frame
-                output_audio_timestamp_ += aac_frame_duration_ms;
-                audio_sample_count_ += 1024;
             }
+            
+            // Increment timestamp for next frame (after processing all packets)
+            // AAC typically uses 1024 samples per frame
+            // Use floating-point calculation to avoid precision loss
+            int aac_frame_duration_ms = static_cast<int>((1024.0 * 1000.0 / frame.sample_rate) + 0.5);
+            output_audio_timestamp_ += aac_frame_duration_ms;
+            audio_sample_count_ += 1024;
         }
     }
 }
