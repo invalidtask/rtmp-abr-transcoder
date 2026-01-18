@@ -64,6 +64,7 @@ private:
     std::vector<uint8_t> build_flv_audio_packet(const EncodedPacket& packet);
     std::vector<uint8_t> build_avc_decoder_config(const std::vector<uint8_t>& sps, const std::vector<uint8_t>& pps);
     std::vector<uint8_t> build_aac_sequence_header(const std::vector<uint8_t>& asc);
+    uint8_t map_sample_rate_to_flv_sound_rate(uint32_t sample_rate);
     
     EpollLoop& loop_;
     std::unique_ptr<H264Decoder> video_decoder_;
