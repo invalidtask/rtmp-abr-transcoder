@@ -221,7 +221,14 @@ void Transcoder::process_video_frame(const VideoFrame& frame) {
     }
     
     // Calculate output timestamp using passthrough from input
-    uint32_t output_ts = frame.timestamp - base_video_timestamp_;
+    // Protect against underflow in case of out-of-order frames
+    uint32_t output_ts = 0;
+    if (frame.timestamp >= base_video_timestamp_) {
+        output_ts = frame.timestamp - base_video_timestamp_;
+    } else {
+        Logger::warn("Video timestamp ", frame.timestamp, " is less than base ", 
+                     base_video_timestamp_, " - using 0");
+    }
     
     Logger::debug("Processing video frame: ", frame.width, "x", frame.height, 
                   " timestamp=", frame.timestamp, " output_ts=", output_ts);
@@ -305,7 +312,14 @@ void Transcoder::process_audio_frame(const AudioFrame& frame) {
     }
     
     // Calculate output timestamp using passthrough from input
-    uint32_t output_ts = frame.timestamp - base_audio_timestamp_;
+    // Protect against underflow in case of out-of-order frames
+    uint32_t output_ts = 0;
+    if (frame.timestamp >= base_audio_timestamp_) {
+        output_ts = frame.timestamp - base_audio_timestamp_;
+    } else {
+        Logger::warn("Audio timestamp ", frame.timestamp, " is less than base ", 
+                     base_audio_timestamp_, " - using 0");
+    }
     
     for (auto& output : outputs_) {
         // Initialize audio encoder on first frame
